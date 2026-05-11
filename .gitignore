@@ -26,3 +26,4 @@ backend/sandbox.db
 # OS
 .DS_Store
 Thumbs.db
+ngrok.yml

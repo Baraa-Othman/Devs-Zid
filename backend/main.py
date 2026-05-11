@@ -1,52 +1,53 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, JSONResponse
 import sqlite3
 import os
-import google.generativeai as genai
+import httpx
 from dotenv import load_dotenv
-# Zid SDK is optional for local dev — import gracefully
+
 load_dotenv()
-try:
-    from zid import ZidClient
-except Exception:
-    ZidClient = None
 
-# Initialize Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+app = FastAPI(title="Zid Automation API")
 
-app = FastAPI()
+# ─── CORS ─────────────────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Database setup
+# ─── Zid OAuth2.0 Config ──────────────────────────────────────────────────────
+ZID_CLIENT_ID     = os.getenv("ZID_CLIENT_ID")
+ZID_CLIENT_SECRET = os.getenv("ZID_CLIENT_SECRET")
+ZID_REDIRECT_URI  = os.getenv("ZID_REDIRECT_URI")
+ZID_CALLBACK_URI  = os.getenv("ZID_CALLBACK_URI")
+ACCESS_TOKEN      = os.getenv("ACCESS_TOKEN")   # pre-issued manager token
+ZID_STORE_ID      = os.getenv("ZID_STORE_ID")
+
+ZID_AUTH_URL      = "https://oauth.zid.sa/oauth/authorize"
+ZID_TOKEN_URL     = "https://oauth.zid.sa/oauth/token"
+ZID_API_BASE      = "https://api.zid.sa/v1"
+
+# In-memory token store (replace with DB for production)
+token_store: dict = {
+    "access_token": ACCESS_TOKEN,
+    "refresh_token": None,
+    "authorization": None,   # Zid's "Authorization" field from token response
+}
+
+# ─── Database ─────────────────────────────────────────────────────────────────
 def init_db():
-    conn = sqlite3.connect('sandbox.db')
-    c = conn.cursor()
-    # Existing table
-    c.execute('''
+    conn = sqlite3.connect("sandbox.db")
+    cursor = conn.cursor()
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id TEXT,
+            order_id      TEXT PRIMARY KEY,
             customer_name TEXT,
-            total REAL,
-            status TEXT
-        )
-    ''')
-    # New tables for AI features
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS stock_alerts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_id TEXT,
-            product_name TEXT,
-            stock_quantity INTEGER,
-            is_resolved BOOLEAN DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS return_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT UNIQUE,
-            status TEXT,
-            history TEXT
+            total         REAL,
+            status        TEXT
         )
     ''')
     conn.commit()
@@ -54,143 +55,167 @@ def init_db():
 
 init_db()
 
+
+# ─── Helper: build Zid API headers ────────────────────────────────────────────
+def zid_headers() -> dict:
+    """
+    Zid requires TWO auth headers on every API call:
+      - X-MANAGER-TOKEN : the access_token (manager token)
+      - Authorization   : Bearer <Authorization field from OAuth response>
+    When using a pre-issued ACCESS_TOKEN (sandbox), we use it for both.
+    """
+    manager_token  = token_store.get("access_token") or ACCESS_TOKEN
+    auth_bearer    = token_store.get("authorization") or ACCESS_TOKEN
+    return {
+        "X-MANAGER-TOKEN": manager_token,
+        "Authorization": f"Bearer {auth_bearer}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+# ─── Health Check ─────────────────────────────────────────────────────────────
 @app.get("/")
 def read_root():
     return {
         "status": "online",
-        "zid_client_initialized": client is not None,
-        "message": "Zid Automation Dashboard API is running"
+        "oauth_configured": bool(ZID_CLIENT_ID),
+        "token_available": bool(token_store.get("access_token")),
+        "message": "Zid Automation API is running",
     }
 
-# Initialize Zid Client (Optional for dev)
-partner_token = os.getenv("PARTNER_TOKEN")
-if partner_token and ZidClient is not None:
-    try:
-        client = ZidClient(
-            authorization=partner_token,
-            store_id=os.getenv("STORE_ID"),
-            store_token=os.getenv("ACCESS_TOKEN")
+
+# ─── OAuth2.0 Step 1: Redirect merchant to Zid login ─────────────────────────
+@app.get("/auth/login")
+def oauth_login():
+    """
+    Redirect the merchant browser to Zid's OAuth authorization page.
+    Zid will ask the merchant to approve access, then redirect back to
+    ZID_REDIRECT_URI with ?code=...
+    """
+    auth_url = (
+        f"{ZID_AUTH_URL}"
+        f"?client_id={ZID_CLIENT_ID}"
+        f"&redirect_uri={ZID_REDIRECT_URI}"
+        f"&response_type=code"
+    )
+    return RedirectResponse(url=auth_url)
+
+
+# ─── OAuth2.0 Step 2: Handle redirect & exchange code for token ───────────────
+@app.get("/auth/redirect")
+async def oauth_redirect(code: str = None, error: str = None):
+    """
+    Zid redirects here after merchant approves.
+    Exchange the one-time `code` for access_token + refresh_token.
+    """
+    if error or not code:
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error or 'no code returned'}")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            ZID_TOKEN_URL,
+            data={
+                "grant_type":    "authorization_code",
+                "client_id":     ZID_CLIENT_ID,
+                "client_secret": ZID_CLIENT_SECRET,
+                "redirect_uri":  ZID_REDIRECT_URI,
+                "code":          code,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
         )
-    except Exception:
-        client = None
-        print("WARNING: Failed to initialize ZidClient — continuing without it.")
-elif partner_token and ZidClient is None:
-    client = None
-    print("WARNING: Zid SDK not installed. ZidClient unavailable.")
-else:
-    client = None
-    print("WARNING: PARTNER_TOKEN not found in .env. ZidClient not initialized.")
 
-# تفعيل CORS عشان الفرونت اند (React) يقدر يكلم الباك اند بدون مشاكل
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], # في الهاكاثون نفتحها للكل للسرعة
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Token exchange failed: {response.text}"
+        )
 
-# Database setup was moved to the top.
+    data = response.json()
 
-# 2. Endpoint لاستقبال الـ Webhook من زد (Automate things)
+    # Zid returns both `access_token` and an `Authorization` field
+    token_store["access_token"]  = data.get("access_token")
+    token_store["refresh_token"] = data.get("refresh_token")
+    token_store["authorization"] = data.get("Authorization")  # ← Zid-specific
+
+    return JSONResponse({
+        "status": "authenticated",
+        "access_token": token_store["access_token"],
+        "message": "OAuth2.0 flow completed successfully",
+    })
+
+
+# ─── OAuth2.0 Step 3 (optional): Handle callback URI ─────────────────────────
+@app.get("/auth/callback")
+async def oauth_callback(code: str = None, error: str = None):
+    """Alias callback endpoint — delegates to redirect handler."""
+    return await oauth_redirect(code=code, error=error)
+
+
+# ─── OAuth2.0 Token Refresh ───────────────────────────────────────────────────
+@app.post("/auth/refresh")
+async def refresh_token():
+    """Use the stored refresh_token to get a new access_token."""
+    rt = token_store.get("refresh_token")
+    if not rt:
+        raise HTTPException(status_code=400, detail="No refresh token stored. Re-authenticate.")
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            ZID_TOKEN_URL,
+            data={
+                "grant_type":    "refresh_token",
+                "client_id":     ZID_CLIENT_ID,
+                "client_secret": ZID_CLIENT_SECRET,
+                "refresh_token": rt,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Refresh failed: {response.text}")
+
+    data = response.json()
+    token_store["access_token"]  = data.get("access_token")
+    token_store["refresh_token"] = data.get("refresh_token", rt)
+    token_store["authorization"] = data.get("Authorization")
+
+    return {"status": "token refreshed", "access_token": token_store["access_token"]}
+
+
+# ─── Auth Status ──────────────────────────────────────────────────────────────
+@app.get("/auth/status")
+def auth_status():
+    return {
+        "authenticated": bool(token_store.get("access_token")),
+        "has_refresh_token": bool(token_store.get("refresh_token")),
+    }
+
+
+# ─── Webhook: receive order events from Zid ───────────────────────────────────
 @app.post("/api/webhook/order")
 async def receive_order_webhook(request: Request):
     payload = await request.json()
-    
-    # استخراج البيانات الأساسية
-    order_id = payload.get("data", {}).get("id", "Unknown")
+
+    order_id      = payload.get("data", {}).get("id", "Unknown")
     customer_name = payload.get("data", {}).get("customer", {}).get("name", "Unknown")
-    total = payload.get("data", {}).get("totals", {}).get("total", 0.0)
-    
-    # حفظ في SQLite
+    total         = payload.get("data", {}).get("totals", {}).get("total", 0.0)
+
     conn = sqlite3.connect("sandbox.db")
     cursor = conn.cursor()
     cursor.execute(
         "INSERT OR REPLACE INTO orders (order_id, customer_name, total, status) VALUES (?, ?, ?, ?)",
-        (order_id, customer_name, total, "New")
+        (order_id, customer_name, total, "New"),
     )
-    
-    # Feature 1: Stock checking simulation
-    try:
-        # We would normally loop through order products and check stock via SDK
-        # Example: stock = client.products.get_product_stock_by_id(item["product_id"])
-        product_id = "PROD-1"
-        product_name = "ميدالية مفاتيح - Test Product"
-        stock_left = 3 # Simulated low stock < 5
-        
-        if stock_left < 5:
-            cursor.execute(
-                'INSERT INTO stock_alerts (product_id, product_name, stock_quantity) VALUES (?, ?, ?)',
-                (product_id, product_name, stock_left)
-            )
-            print(f"URGENT ALERT: {product_name} stock is low ({stock_left}).")
-    except Exception as e:
-        print(f"Error checking stock: {e}")
-            
     conn.commit()
     conn.close()
-    
-    return {"status": "success", "message": f"Order {order_id} automated!"}
 
-@app.get("/api/alerts")
-def get_alerts():
-    conn = sqlite3.connect('sandbox.db')
-    c = conn.cursor()
-    c.execute('SELECT id, product_id, product_name, stock_quantity, created_at FROM stock_alerts WHERE is_resolved = 0 ORDER BY created_at DESC')
-    alerts = [{"id": row[0], "product_id": row[1], "product_name": row[2], "stock": row[3], "date": row[4]} for row in c.fetchall()]
-    conn.close()
-    return alerts
+    return {"status": "success", "message": f"Order {order_id} received."}
 
 
-@app.post("/api/products/ai-create")
-async def create_product_with_ai(request: Request):
-    """
-    Receives an image and a 'tone'. Uses Gemini to generate product details,
-    then pushes the product to Zid via the SDK.
-    """
-    payload = await request.json()
-    image_url = payload.get("image_url", "")
-    tone = payload.get("tone", "احترافي")
-    
-    prompt = f"""
-    أنت خبير في التجارة الإلكترونية ومختص بكتابة وصف للمنتجات.
-    قم بإنشاء تفاصيل لمنتج جديد بناءً على المعلومات التالية:
-    - الرابط أو وصف الصورة: {image_url}
-    - النبرة المطلوبة: {tone}
-    
-    الرجاء تقديم الرد بصيغة JSON تحتوي على:
-    "name": اسم المنتج باللغة العربية
-    "description": وصف المنتج باللغة العربية
-    "price": السعر المقترح كرقم صحيح (مثلاً 50)
-    "seo_title": عنوان SEO
-    "seo_description": وصف SEO
-    """
-    
-    import json
-    
-    try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        response = model.generate_content(prompt)
-        # Parse the JSON from the markdown block returned by Gemini
-        text = response.text
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0]
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0]
-            
-        ai_data = json.loads(text.strip())
-        
-        # Now we would push this to Zid!
-        # For PoC, we will simulate the push if client is None
-        if client:
-            # Example SDK call: client.products.create_a_new_product(name=ai_data["name"], ...)
-            pass
-            
-        return {"status": "success", "data": ai_data}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# 3. Endpoint للفرونت اند عشان يعرض الطلبات في لوحة التحكم
+# ─── Orders: list stored orders ───────────────────────────────────────────────
 @app.get("/api/orders")
 def get_orders():
     conn = sqlite3.connect("sandbox.db")
@@ -198,9 +223,28 @@ def get_orders():
     cursor.execute("SELECT * FROM orders")
     rows = cursor.fetchall()
     conn.close()
-    
-    # تحويل البيانات لمصفوفة عشان الرياكت
-    orders = [{"order_id": r[0], "customer_name": r[1], "total": r[2], "status": r[3]} for r in rows]
-    return orders
+    return [{"order_id": r[0], "customer_name": r[1], "total": r[2], "status": r[3]} for r in rows]
 
-# لتشغيل السيرفر: uvicorn main:app --reload
+
+# ─── Proxy: fetch live orders from Zid API ────────────────────────────────────
+@app.get("/api/zid/orders")
+async def get_zid_orders():
+    """Fetch orders directly from the Zid API using authenticated headers."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{ZID_API_BASE}/managers/store/orders/",
+            headers=zid_headers(),
+            params={"store_id": ZID_STORE_ID},
+            timeout=15,
+        )
+
+    if response.status_code == 401:
+        raise HTTPException(status_code=401, detail="Zid API: Unauthorized. Re-authenticate via /auth/login")
+    if response.status_code == 429:
+        raise HTTPException(status_code=429, detail="Zid API: Rate limit hit (60 req/min). Try again shortly.")
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+
+    return response.json()
+
+# To run: .\venv\Scripts\python -m uvicorn main:app --reload
