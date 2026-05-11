@@ -10,7 +10,13 @@
   },
   "dependencies": {
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "@zidsa/zidmui": "latest",
+    "@mui/material": "^5.15.0",
+    "@mui/lab": "^5.0.0-alpha.150",
+    "@emotion/react": "^11.11.0",
+    "@emotion/styled": "^11.11.0",
+    "use-debounce": "^10.0.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.43",

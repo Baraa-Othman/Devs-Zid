@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react'
+import { ThemeProvider, CssBaseline, Container, Box, Typography } from '@mui/material'
+import { themeParcel } from '@zidsa/zidmui/theme/theme'
+import { AppCard } from '@zidsa/zidmui/components/app-card'
+import { AppButton } from '@zidsa/zidmui/components/app-button'
+
+// Zid MUI uses standard HTML tables with 'zid-table' class for the platform look
+import '@zidsa/zidmui/styles/components/table.css' 
 
 function App() {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
 
-  // جلب البيانات من الباك اند (FastAPI)
   const fetchOrders = async () => {
     try {
       const response = await fetch('http://localhost:8000/api/orders')
@@ -19,45 +25,74 @@ function App() {
 
   useEffect(() => {
     fetchOrders()
-    // تحديث البيانات كل 5 ثواني عشان تبان كأنها Real-time للجنة التحكيم
     const interval = setInterval(fetchOrders, 5000)
     return () => clearInterval(interval)
   }, [])
 
   return (
-    <div style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif', direction: 'rtl' }}>
-      <h1>⚙️ لوحة أتمتة التاجر (Sandbox)</h1>
-      <p>هنا تظهر الطلبات المؤتمتة القادمة من زد فوراً:</p>
+    <ThemeProvider theme={themeParcel}>
+      <CssBaseline />
+      <Box sx={{ minHeight: '100vh', bgcolor: '#f4f6f8', py: 4, direction: 'rtl' }}>
+        <Container maxWidth="lg">
+          <Box sx={{ mb: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Box>
+              <Typography variant="h4" fontWeight="700" color="primary" gutterBottom>
+                ⚙️ لوحة أتمتة التاجر (Sandbox)
+              </Typography>
+              <Typography variant="body1" color="textSecondary">
+                هنا تظهر الطلبات المؤتمتة القادمة من زد فوراً
+              </Typography>
+            </Box>
+            <AppButton variant="contained" color="primary" onClick={fetchOrders}>
+              تحديث البيانات
+            </AppButton>
+          </Box>
 
-      {loading ? (
-        <p>جاري التحميل...</p>
-      ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem' }}>
-          <thead>
-            <tr style={{ background: '#f3f4f6', textAlign: 'right' }}>
-              <th style={{ padding: '10px', borderBottom: '2px solid #ddd' }}>رقم الطلب</th>
-              <th style={{ padding: '10px', borderBottom: '2px solid #ddd' }}>اسم العميل</th>
-              <th style={{ padding: '10px', borderBottom: '2px solid #ddd' }}>الإجمالي</th>
-              <th style={{ padding: '10px', borderBottom: '2px solid #ddd' }}>حالة الأتمتة</th>
-            </tr>
-          </thead>
-          <tbody>
-            {orders.length === 0 ? (
-              <tr><td colSpan="4" style={{ padding: '10px', textAlign: 'center' }}>لا توجد طلبات حتى الآن. أرسل Webhook للتجربة!</td></tr>
+          <AppCard>
+            {loading ? (
+              <Box sx={{ p: 4, textAlign: 'center' }}>
+                <Typography>جاري التحميل...</Typography>
+              </Box>
             ) : (
-              orders.map((order) => (
-                <tr key={order.order_id}>
-                  <td style={{ padding: '10px', borderBottom: '1px solid #ddd' }}>#{order.order_id}</td>
-                  <td style={{ padding: '10px', borderBottom: '1px solid #ddd' }}>{order.customer_name}</td>
-                  <td style={{ padding: '10px', borderBottom: '1px solid #ddd' }}>{order.total} ر.س</td>
-                  <td style={{ padding: '10px', borderBottom: '1px solid #ddd', color: 'green' }}>✅ تمت الأتمتة</td>
-                </tr>
-              ))
+              <Box sx={{ overflowX: 'auto' }}>
+                <table className="zid-table">
+                  <thead>
+                    <tr>
+                      <th>رقم الطلب</th>
+                      <th>اسم العميل</th>
+                      <th>الإجمالي</th>
+                      <th>حالة الأتمتة</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orders.length === 0 ? (
+                      <tr>
+                        <td colSpan="4" style={{ textAlign: 'center', padding: '2rem' }}>
+                          لا توجد طلبات حتى الآن. أرسل Webhook للتجربة!
+                        </td>
+                      </tr>
+                    ) : (
+                      orders.map((order) => (
+                        <tr key={order.order_id}>
+                          <td>#{order.order_id}</td>
+                          <td>{order.customer_name}</td>
+                          <td>{order.total} ر.س</td>
+                          <td>
+                            <Box sx={{ color: 'success.main', display: 'flex', alignItems: 'center', gap: 1 }}>
+                              ✅ تمت الأتمتة
+                            </Box>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </Box>
             )}
-          </tbody>
-        </table>
-      )}
-    </div>
+          </AppCard>
+        </Container>
+      </Box>
+    </ThemeProvider>
   )
 }
 

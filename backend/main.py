@@ -1,8 +1,33 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
+import os
+from dotenv import load_dotenv
+from zid import ZidClient
+
+load_dotenv()
 
 app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {
+        "status": "online",
+        "zid_client_initialized": client is not None,
+        "message": "Zid Automation Dashboard API is running"
+    }
+
+# Initialize Zid Client (Optional for dev)
+partner_token = os.getenv("PARTNER_TOKEN")
+if partner_token:
+    client = ZidClient(
+        authorization=partner_token,
+        store_id=os.getenv("STORE_ID"),
+        store_token=os.getenv("ACCESS_TOKEN")
+    )
+else:
+    client = None
+    print("WARNING: PARTNER_TOKEN not found in .env. ZidClient not initialized.")
 
 # تفعيل CORS عشان الفرونت اند (React) يقدر يكلم الباك اند بدون مشاكل
 app.add_middleware(
