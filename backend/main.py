@@ -3,9 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import os
 from dotenv import load_dotenv
-from zid import ZidClient
-
+# Zid SDK is optional for local dev — import gracefully
 load_dotenv()
+try:
+    from zid import ZidClient
+except Exception:
+    ZidClient = None
 
 app = FastAPI()
 
@@ -19,12 +22,19 @@ def read_root():
 
 # Initialize Zid Client (Optional for dev)
 partner_token = os.getenv("PARTNER_TOKEN")
-if partner_token:
-    client = ZidClient(
-        authorization=partner_token,
-        store_id=os.getenv("STORE_ID"),
-        store_token=os.getenv("ACCESS_TOKEN")
-    )
+if partner_token and ZidClient is not None:
+    try:
+        client = ZidClient(
+            authorization=partner_token,
+            store_id=os.getenv("STORE_ID"),
+            store_token=os.getenv("ACCESS_TOKEN")
+        )
+    except Exception:
+        client = None
+        print("WARNING: Failed to initialize ZidClient — continuing without it.")
+elif partner_token and ZidClient is None:
+    client = None
+    print("WARNING: Zid SDK not installed. ZidClient unavailable.")
 else:
     client = None
     print("WARNING: PARTNER_TOKEN not found in .env. ZidClient not initialized.")
