@@ -102,6 +102,28 @@ const copy = {
     marketingPlan: 'Marketing plan',
     publishing: 'Publishing...',
     publish: 'Publish Product to Zid',
+    couponsTitle: 'Coupons',
+    couponsSubtitle: 'Create, edit, and delete marketing coupons from Zid.',
+    couponName: 'Coupon name',
+    couponCode: 'Coupon code',
+    discountType: 'Discount type',
+    percentDiscount: 'Percent',
+    fixedDiscount: 'Fixed amount',
+    freeShipping: 'Free shipping',
+    discount: 'Discount',
+    minimumOrder: 'Minimum order',
+    maximumOrder: 'Maximum order',
+    startDate: 'Start date',
+    endDate: 'End date',
+    active: 'Active',
+    inactive: 'Inactive',
+    createCoupon: 'Create coupon',
+    updateCoupon: 'Update coupon',
+    reset: 'Reset',
+    loadingCoupons: 'Loading coupons...',
+    noCoupons: 'No coupons returned from Zid yet.',
+    edit: 'Edit',
+    couponSaved: 'Coupon saved.',
     why: 'Why',
     reasonFallback: 'Add this manually or generate with AI to see the reason.',
     tones: {
@@ -181,6 +203,28 @@ const copy = {
     marketingPlan: 'الخطة التسويقية',
     publishing: 'جاري النشر...',
     publish: 'نشر المنتج في زد',
+    couponsTitle: 'الكوبونات',
+    couponsSubtitle: 'أنشئ كوبونات التسويق وعدلها واحذفها من زد.',
+    couponName: 'اسم الكوبون',
+    couponCode: 'رمز الكوبون',
+    discountType: 'نوع الخصم',
+    percentDiscount: 'نسبة مئوية',
+    fixedDiscount: 'مبلغ ثابت',
+    freeShipping: 'شحن مجاني',
+    discount: 'الخصم',
+    minimumOrder: 'الحد الأدنى للطلب',
+    maximumOrder: 'الحد الأعلى للطلب',
+    startDate: 'تاريخ البداية',
+    endDate: 'تاريخ النهاية',
+    active: 'مفعل',
+    inactive: 'غير مفعل',
+    createCoupon: 'إنشاء كوبون',
+    updateCoupon: 'تحديث الكوبون',
+    reset: 'إعادة ضبط',
+    loadingCoupons: 'جاري تحميل الكوبونات...',
+    noCoupons: 'لم ترجع كوبونات من زد بعد.',
+    edit: 'تعديل',
+    couponSaved: 'تم حفظ الكوبون.',
     why: 'السبب',
     reasonFallback: 'أضف هذا يدويا أو أنشئه بالذكاء الاصطناعي لرؤية السبب.',
     tones: {
@@ -215,6 +259,19 @@ const emptyDraft = {
   recommended_price: '',
   stock: '',
   marketing_plan: '',
+}
+
+const emptyCouponDraft = {
+  name: '',
+  code: '',
+  discount_type: 'p',
+  discount: '',
+  total: '',
+  max_total: '',
+  date_start: '',
+  date_end: '',
+  status: true,
+  free_shipping: false,
 }
 
 const draftFieldKeys = [
@@ -401,6 +458,21 @@ function productMatchesSearch(product, query) {
   return haystack.includes(query)
 }
 
+function couponEditDraft(coupon) {
+  return {
+    name: stringField(coupon, ['name']),
+    code: stringField(coupon, ['code']),
+    discount_type: stringField(coupon, ['discount_type'], 'p'),
+    discount: stringField(coupon, ['discount'], '0'),
+    total: stringField(coupon, ['total']),
+    max_total: stringField(coupon, ['max_total']),
+    date_start: stringField(coupon, ['date_start']),
+    date_end: stringField(coupon, ['date_end']),
+    status: Boolean(coupon?.enabled || coupon?.coupon_status),
+    free_shipping: Boolean(coupon?.free_shipping),
+  }
+}
+
 function Stat({ label, value, tone = 'default' }) {
   const colors = {
     default: ['#f8fafc', '#334155'],
@@ -446,6 +518,7 @@ function App() {
   const [orders, setOrders] = useState([])
   const [alerts, setAlerts] = useState([])
   const [products, setProducts] = useState([])
+  const [coupons, setCoupons] = useState([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -462,6 +535,7 @@ function App() {
   const [generatorError, setGeneratorError] = useState('')
   const [publishMessage, setPublishMessage] = useState('')
   const [stockMessage, setStockMessage] = useState('')
+  const [couponMessage, setCouponMessage] = useState('')
   const [stockAdditions, setStockAdditions] = useState({})
   const [updatingStockId, setUpdatingStockId] = useState('')
   const [deletingProductId, setDeletingProductId] = useState('')
@@ -469,6 +543,10 @@ function App() {
   const [editingProductId, setEditingProductId] = useState('')
   const [productEditDrafts, setProductEditDrafts] = useState({})
   const [savingProductId, setSavingProductId] = useState('')
+  const [couponDraft, setCouponDraft] = useState({ ...emptyCouponDraft })
+  const [editingCouponId, setEditingCouponId] = useState('')
+  const [savingCoupon, setSavingCoupon] = useState(false)
+  const [deletingCouponId, setDeletingCouponId] = useState('')
   const [generatedRaw, setGeneratedRaw] = useState(null)
   const [fieldExplanations, setFieldExplanations] = useState({})
   const [draftVisible, setDraftVisible] = useState(false)
@@ -493,10 +571,11 @@ function App() {
     quiet ? setRefreshing(true) : setLoading(true)
 
     try {
-      const [ordersResult, alertsResult, productsResult] = await Promise.allSettled([
+      const [ordersResult, alertsResult, productsResult, couponsResult] = await Promise.allSettled([
         fetchJson('/api/orders'),
         fetchJson('/api/alerts'),
         fetchJson('/api/products'),
+        fetchJson('/api/coupons'),
       ])
 
       if (ordersResult.status === 'fulfilled') {
@@ -507,6 +586,9 @@ function App() {
       }
       if (productsResult.status === 'fulfilled') {
         setProducts(asArray(productsResult.value, 'products'))
+      }
+      if (couponsResult.status === 'fulfilled') {
+        setCoupons(asArray(couponsResult.value, 'coupons'))
       }
 
       if (ordersResult.status === 'rejected' && alertsResult.status === 'rejected') {
@@ -654,6 +736,66 @@ function App() {
 
   function updateDraft(key, value) {
     setDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  function updateCouponDraft(key, value) {
+    setCouponDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  function resetCouponDraft() {
+    setCouponDraft({ ...emptyCouponDraft })
+    setEditingCouponId('')
+  }
+
+  function editCoupon(coupon) {
+    const couponId = field(coupon, ['coupon_id', 'id'], '')
+    setEditingCouponId(couponId)
+    setCouponDraft(couponEditDraft(coupon))
+  }
+
+  async function saveCoupon() {
+    setSavingCoupon(true)
+    setCouponMessage('')
+
+    try {
+      const payload = await fetchJson(editingCouponId ? `/api/coupons/${encodeURIComponent(editingCouponId)}` : '/api/coupons', {
+        method: editingCouponId ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(couponDraft),
+      })
+      setCouponMessage(payload?.message || t.couponSaved)
+      resetCouponDraft()
+      const refreshed = await fetchJson('/api/coupons')
+      setCoupons(asArray(refreshed, 'coupons'))
+    } catch (error) {
+      setCouponMessage(error.message || 'Could not save coupon.')
+    } finally {
+      setSavingCoupon(false)
+    }
+  }
+
+  async function deleteCoupon(coupon) {
+    const couponId = field(coupon, ['coupon_id', 'id'], '')
+    if (!couponId) {
+      setCouponMessage('Could not find coupon ID.')
+      return
+    }
+
+    setDeletingCouponId(couponId)
+    setCouponMessage('')
+
+    try {
+      const payload = await fetchJson(`/api/coupons/${encodeURIComponent(couponId)}`, {
+        method: 'DELETE',
+      })
+      setCoupons((current) => current.filter((item) => field(item, ['coupon_id', 'id'], '') !== couponId))
+      setCouponMessage(payload?.message || 'Coupon deleted.')
+      if (editingCouponId === couponId) resetCouponDraft()
+    } catch (error) {
+      setCouponMessage(error.message || 'Could not delete coupon.')
+    } finally {
+      setDeletingCouponId('')
+    }
   }
 
   function handleCreatorModeChange(_event, value) {
@@ -1175,6 +1317,99 @@ function App() {
                           })}
                         </Box>
                       </Box>
+                    </Box>
+                  )}
+                </Paper>
+
+                <Paper elevation={0} sx={{ mt: 3, border: '1px solid #e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
+                  <Box sx={{ p: { xs: 2, md: 3 } }}>
+                    <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                      {t.couponsTitle}
+                    </Typography>
+                    <Typography color="text.secondary" sx={{ mt: 0.75, mb: 2 }}>
+                      {t.couponsSubtitle}
+                    </Typography>
+                    <Grid container spacing={1.5}>
+                      <Grid item xs={12} sm={6}>
+                        <TextField label={t.couponName} value={couponDraft.name} onChange={(e) => updateCouponDraft('name', e.target.value)} fullWidth size="small" required />
+                      </Grid>
+                      <Grid item xs={12} sm={6}>
+                        <TextField label={t.couponCode} value={couponDraft.code} onChange={(e) => updateCouponDraft('code', e.target.value)} fullWidth size="small" required />
+                      </Grid>
+                      <Grid item xs={12} sm={4} sx={{ display: 'flex', alignItems: 'flex-end' }}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel id="coupon-type-label">{t.discountType}</InputLabel>
+                          <Select labelId="coupon-type-label" label={t.discountType} value={couponDraft.discount_type} onChange={(e) => updateCouponDraft('discount_type', e.target.value)}>
+                            <MenuItem value="p">{t.percentDiscount}</MenuItem>
+                            <MenuItem value="f">{t.fixedDiscount}</MenuItem>
+                            <MenuItem value="free_shipping">{t.freeShipping}</MenuItem>
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                      <Grid item xs={12} sm={4} sx={{ display: 'flex', alignItems: 'flex-end' }}>
+                        <TextField label={t.discount} type="number" value={couponDraft.discount} onChange={(e) => updateCouponDraft('discount', e.target.value)} fullWidth size="small" disabled={couponDraft.discount_type === 'free_shipping'} inputProps={{ min: 0, step: 0.01 }} />
+                      </Grid>
+                      <Grid item xs={12} sm={4} sx={{ display: 'flex', alignItems: 'flex-end' }}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel id="coupon-status-label">{t.active}</InputLabel>
+                          <Select labelId="coupon-status-label" label={t.active} value={couponDraft.status ? '1' : '0'} onChange={(e) => updateCouponDraft('status', e.target.value === '1')}>
+                            <MenuItem value="1">{t.active}</MenuItem>
+                            <MenuItem value="0">{t.inactive}</MenuItem>
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                      <Grid item xs={12} sm={6}>
+                        <TextField label={t.minimumOrder} type="number" value={couponDraft.total} onChange={(e) => updateCouponDraft('total', e.target.value)} fullWidth size="small" inputProps={{ min: 0, step: 0.01 }} />
+                      </Grid>
+                      <Grid item xs={12} sm={6}>
+                        <TextField label={t.maximumOrder} type="number" value={couponDraft.max_total} onChange={(e) => updateCouponDraft('max_total', e.target.value)} fullWidth size="small" inputProps={{ min: 0, step: 0.01 }} />
+                      </Grid>
+                      <Grid item xs={12} sm={6}>
+                        <TextField label={t.startDate} type="date" value={couponDraft.date_start} onChange={(e) => updateCouponDraft('date_start', e.target.value)} fullWidth size="small" InputLabelProps={{ shrink: true }} />
+                      </Grid>
+                      <Grid item xs={12} sm={6}>
+                        <TextField label={t.endDate} type="date" value={couponDraft.date_end} onChange={(e) => updateCouponDraft('date_end', e.target.value)} fullWidth size="small" InputLabelProps={{ shrink: true }} />
+                      </Grid>
+                      <Grid item xs={12}>
+                        <Stack direction="row" spacing={1}>
+                          <Button variant="contained" onClick={saveCoupon} disabled={savingCoupon}>
+                            {savingCoupon ? t.saving : editingCouponId ? t.updateCoupon : t.createCoupon}
+                          </Button>
+                          <Button variant="text" onClick={resetCouponDraft} disabled={savingCoupon}>{t.reset}</Button>
+                        </Stack>
+                      </Grid>
+                    </Grid>
+                    {couponMessage && <Alert severity="info" sx={{ mt: 2 }}>{couponMessage}</Alert>}
+                  </Box>
+                  <Divider />
+                  {loading ? (
+                    <Stack sx={{ minHeight: 120 }} alignItems="center" justifyContent="center" spacing={2}>
+                      <CircularProgress size={24} />
+                      <Typography color="text.secondary">{t.loadingCoupons}</Typography>
+                    </Stack>
+                  ) : coupons.length === 0 ? (
+                    <Box sx={{ p: 3 }}>
+                      <Alert severity="info">{t.noCoupons}</Alert>
+                    </Box>
+                  ) : (
+                    <Box sx={{ overflow: 'auto', maxHeight: 300 }}>
+                      {coupons.map((coupon, index) => {
+                        const couponId = field(coupon, ['coupon_id', 'id'], '')
+                        return (
+                          <Stack key={couponId || index} direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between" sx={{ p: 2, borderTop: index ? '1px solid #eef0f3' : 0 }}>
+                            <Box sx={{ minWidth: 0 }}>
+                              <Typography sx={{ fontWeight: 900, overflowWrap: 'anywhere' }}>{field(coupon, ['name'])}</Typography>
+                              <Typography variant="body2" color="text.secondary">{field(coupon, ['code'])} · {field(coupon, ['discount'], 0)}{field(coupon, ['discount_type']) === 'p' ? '%' : ' SAR'}</Typography>
+                            </Box>
+                            <Stack direction="row" spacing={1}>
+                              <Button variant="outlined" size="small" onClick={() => editCoupon(coupon)}>{t.edit}</Button>
+                              <Button variant="outlined" color="error" size="small" onClick={() => deleteCoupon(coupon)} disabled={deletingCouponId === couponId}>
+                                {deletingCouponId === couponId ? t.deleting : t.delete}
+                              </Button>
+                            </Stack>
+                          </Stack>
+                        )
+                      })}
                     </Box>
                   )}
                 </Paper>

@@ -191,6 +191,40 @@ async def zid_request(path, params=None, method="GET", json_body=None):
     return response.json()
 
 
+async def zid_multipart_request(path, form_body=None, method="POST"):
+    if not zid_ready():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Zid ACCESS_TOKEN/ZID_ACCESS_TOKEN and ZID_STORE_ID/STORE_ID",
+        )
+
+    files = {
+        key: (None, str(value))
+        for key, value in (form_body or {}).items()
+        if value is not None
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method,
+            f"{ZID_API_BASE}{path}",
+            headers=zid_headers(content_type=None),
+            files=files,
+            timeout=20,
+        )
+
+    if response.status_code == 401:
+        raise HTTPException(status_code=401, detail="Zid API: Unauthorized. Re-authenticate via /auth/login")
+    if response.status_code == 429:
+        raise HTTPException(status_code=429, detail="Zid API: Rate limit hit. Try again shortly.")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    if response.status_code == 204 or not response.content:
+        return {}
+
+    return response.json()
+
+
 def payload_list(payload, *keys):
     if isinstance(payload, list):
         return payload
@@ -405,6 +439,33 @@ def normalize_product(product):
     }
 
 
+def normalize_coupon(coupon):
+    if not isinstance(coupon, dict):
+        return {}
+
+    coupon_id = first_value(coupon.get("coupon_id"), coupon.get("id"))
+    return {
+        "id": str(coupon_id) if coupon_id is not None else None,
+        "coupon_id": str(coupon_id) if coupon_id is not None else None,
+        "name": first_value(coupon.get("name"), default="Coupon"),
+        "code": first_value(coupon.get("code"), default=""),
+        "discount_type": first_value(coupon.get("discount_type"), default="p"),
+        "discount": to_float(coupon.get("discount")),
+        "total": to_float(coupon.get("total")),
+        "uses_total": to_int(coupon.get("uses_total")),
+        "uses_customer": to_int(coupon.get("uses_customer")),
+        "date_start": coupon.get("date_start"),
+        "date_end": coupon.get("date_end"),
+        "coupon_status": bool(coupon.get("coupon_status") or coupon.get("enabled")),
+        "enabled": bool(coupon.get("enabled") or coupon.get("coupon_status")),
+        "free_shipping": bool(coupon.get("free_shipping")),
+        "free_cod": bool(coupon.get("free_cod")),
+        "apply_to": first_value(coupon.get("apply_to"), default="all"),
+        "status_code": coupon.get("status_code"),
+        "raw": coupon,
+    }
+
+
 async def fetch_zid_orders(limit=100, payload_type="default"):
     payload = await zid_request(
         "/managers/store/orders/",
@@ -426,6 +487,15 @@ async def fetch_zid_products(limit=100):
     )
     raw_products = payload_list(payload, "results", "products", "data", "payload")
     return [product for product in (normalize_product(item) for item in raw_products[:limit]) if product]
+
+
+async def fetch_zid_coupons(limit=100):
+    payload = await zid_request(
+        "/managers/store/coupons",
+        params={"page_size": limit},
+    )
+    raw_coupons = payload_list(payload, "coupons", "data", "payload", "results")
+    return [coupon for coupon in (normalize_coupon(item) for item in raw_coupons[:limit]) if coupon]
 
 
 def sales_velocity_for(orders, product_id, sku):
@@ -859,6 +929,57 @@ def product_update_payload_for_zid(body):
     return payload
 
 
+def coupon_payload_for_zid(body):
+    name = first_value(body.get("name"), body.get("coupon_name"))
+    code = first_value(body.get("code"), body.get("coupon_code"))
+    discount_type = first_value(body.get("discount_type"), default="p")
+    discount = first_value(body.get("discount"), body.get("amount"))
+    total = first_value(body.get("total"), body.get("minimum_total"), default=0)
+    date_start = first_value(body.get("date_start"), body.get("start_date"))
+    date_end = first_value(body.get("date_end"), body.get("end_date"))
+
+    if not str(name or "").strip():
+        raise HTTPException(status_code=400, detail="Coupon name is required")
+    if not str(code or "").strip():
+        raise HTTPException(status_code=400, detail="Coupon code is required")
+    if discount_type not in ("p", "f", "free_shipping"):
+        raise HTTPException(status_code=400, detail="Discount type must be p, f, or free_shipping")
+    if discount_type != "free_shipping" and (to_float(discount, None) is None or to_float(discount) <= 0):
+        raise HTTPException(status_code=400, detail="Discount must be greater than 0")
+
+    status = body.get("status")
+    if status is None:
+        status = body.get("enabled", True)
+
+    payload = {
+        "name": str(name).strip(),
+        "code": str(code).strip(),
+        "discount_type": discount_type,
+        "discount": 0 if discount_type == "free_shipping" else to_float(discount),
+        "free_shipping": "1" if bool(body.get("free_shipping")) or discount_type == "free_shipping" else "0",
+        "free_cod": "1" if bool(body.get("free_cod")) else "0",
+        "total": to_float(total, 0),
+        "date_start": str(date_start or ""),
+        "date_end": str(date_end or ""),
+        "uses_total": to_int(first_value(body.get("uses_total"), default=0)),
+        "uses_customer": to_int(first_value(body.get("uses_customer"), default=0)),
+        "status": "1" if bool(status) else "0",
+        "apply_to": first_value(body.get("apply_to"), default="all"),
+        "applying_method": first_value(body.get("applying_method"), default="CODE"),
+        "max_total": first_value(body.get("max_total"), body.get("maximum_total"), default=""),
+        "max_weight": first_value(body.get("max_weight"), default=""),
+        "maximum_discount_value": first_value(body.get("maximum_discount_value"), default=""),
+        "is_mazeed_active": first_value(body.get("is_mazeed_active"), default=""),
+        "is_pos_active": "1" if bool(body.get("is_pos_active")) else "",
+        "is_shown_in_pos": "1" if bool(body.get("is_shown_in_pos")) else "",
+        "is_mobile_app_active": "1" if bool(body.get("is_mobile_app_active")) else "",
+        "conditions": first_value(body.get("conditions"), default=""),
+        "conditions_criteria": first_value(body.get("conditions_criteria"), default=""),
+    }
+
+    return payload
+
+
 @app.get("/")
 def read_root():
     return {
@@ -1032,6 +1153,15 @@ async def get_products():
     }
 
 
+@app.get("/api/coupons")
+async def get_coupons():
+    coupons = await fetch_zid_coupons(limit=100)
+    return {
+        "status": "success",
+        "coupons": coupons,
+    }
+
+
 @app.post("/api/alerts/recalculate")
 async def recalculate_alerts():
     alerts = await build_low_stock_alerts()
@@ -1054,6 +1184,11 @@ async def get_zid_orders():
 @app.get("/api/zid/products")
 async def get_zid_products():
     return await zid_request("/products/", params={"extended": "true"})
+
+
+@app.get("/api/zid/coupons")
+async def get_zid_coupons():
+    return await zid_request("/managers/store/coupons")
 
 
 @app.post("/api/products/ai-create")
@@ -1197,6 +1332,58 @@ async def update_product(product_id: str, request: Request):
         "zid_payload": payload,
         "zid_response": update_response,
         "product": normalize_product(verified_product),
+    }
+
+
+@app.post("/api/coupons")
+async def create_coupon(request: Request):
+    body = await request.json()
+    payload = coupon_payload_for_zid(body)
+    response = await zid_multipart_request(
+        "/managers/store/coupons/add",
+        form_body=payload,
+    )
+
+    return {
+        "status": "success",
+        "message": "Coupon created in Zid",
+        "zid_payload": payload,
+        "zid_response": response,
+        "coupon": normalize_coupon(response.get("coupon") if isinstance(response, dict) else {}),
+    }
+
+
+@app.patch("/api/coupons/{coupon_id}")
+async def update_coupon(coupon_id: str, request: Request):
+    body = await request.json()
+    payload = coupon_payload_for_zid(body)
+    response = await zid_multipart_request(
+        f"/managers/store/coupons/{coupon_id}/update",
+        form_body=payload,
+    )
+
+    return {
+        "status": "success",
+        "message": "Coupon updated in Zid",
+        "coupon_id": coupon_id,
+        "zid_payload": payload,
+        "zid_response": response,
+        "coupon": normalize_coupon(response.get("coupon") if isinstance(response, dict) else {}),
+    }
+
+
+@app.delete("/api/coupons/{coupon_id}")
+async def delete_coupon(coupon_id: str):
+    response = await zid_request(
+        f"/managers/store/coupons/{coupon_id}",
+        method="DELETE",
+    )
+
+    return {
+        "status": "success",
+        "message": "Coupon deleted from Zid",
+        "coupon_id": coupon_id,
+        "zid_response": response,
     }
 
 
