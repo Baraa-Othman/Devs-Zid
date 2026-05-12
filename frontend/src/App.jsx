@@ -283,11 +283,6 @@ function App() {
   const [draftVisible, setDraftVisible] = useState(false)
   const [draft, setDraft] = useState({ ...emptyDraft })
 
-  const totalSold = useMemo(
-    () => alerts.reduce((sum, item) => sum + Number(field(item, ['sold_quantity'], 0)), 0),
-    [alerts],
-  )
-
   async function loadDashboard({ quiet = false } = {}) {
     setLoadError('')
     quiet ? setRefreshing(true) : setLoading(true)
@@ -569,11 +564,6 @@ function App() {
                     Live stock alerts and recent orders from Zid, plus AI product descriptions ready to review and publish.
                   </Typography>
                 </Box>
-                <Stack direction="row" spacing={1.25} flexWrap="wrap" useFlexGap>
-                  <Button variant="contained" onClick={() => loadDashboard({ quiet: true })} disabled={refreshing}>
-                    {refreshing ? 'Refreshing...' : 'Refresh'}
-                  </Button>
-                </Stack>
               </Stack>
             </Paper>
 
@@ -587,7 +577,7 @@ function App() {
                 <Stat label="Recent orders from Zid" value={orders.length} tone="blue" />
               </Grid>
               <Grid item xs={12} md={4}>
-                <Stat label="Units sold in alert items" value={totalSold} />
+                <Stat label="Products in store" value={products.length} />
               </Grid>
             </Grid>
 
