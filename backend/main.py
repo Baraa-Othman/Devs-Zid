@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import base64
+import binascii
 import json
 import os
-import sqlite3
 import uuid
 
 import httpx
@@ -10,14 +11,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
-
-try:
-    import firebase_admin
-    from firebase_admin import credentials, firestore
-except ImportError:
-    firebase_admin = None
-    credentials = None
-    firestore = None
 
 try:
     import google.generativeai as genai
@@ -42,7 +35,6 @@ app.add_middleware(
 ZID_CLIENT_ID = os.getenv("ZID_CLIENT_ID")
 ZID_CLIENT_SECRET = os.getenv("ZID_CLIENT_SECRET")
 ZID_REDIRECT_URI = os.getenv("ZID_REDIRECT_URI")
-ZID_CALLBACK_URI = os.getenv("ZID_CALLBACK_URI")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") or os.getenv("ZID_ACCESS_TOKEN")
 AUTHORIZATION_TOKEN = os.getenv("ZID_AUTHORIZATION") or os.getenv("AUTHORIZATION")
 ZID_STORE_ID = os.getenv("ZID_STORE_ID") or os.getenv("STORE_ID")
@@ -53,7 +45,29 @@ ZID_API_BASE = "https://api.zid.sa/v1"
 
 LOW_STOCK_THRESHOLD = int(os.getenv("LOW_STOCK_THRESHOLD", "5"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+
+AI_PRODUCT_FIELDS = [
+    "trendy_name",
+    "trendy_name_arabic",
+    "description",
+    "description_arabic",
+    "marketing_audience",
+    "marketing_partners",
+    "recommended_price",
+    "marketing_plan",
+]
+
+AI_EXPLANATION_FALLBACKS = {
+    "trendy_name": "Chosen to make the product feel searchable and current.",
+    "trendy_name_arabic": "Chosen to sound natural for Arabic-speaking shoppers.",
+    "description": "Written to connect product details with a clear shopper benefit.",
+    "description_arabic": "Written to keep the Arabic product story clear and persuasive.",
+    "marketing_audience": "Selected from the product details and likely buyer intent.",
+    "marketing_partners": "Suggested from channels that can realistically promote this item.",
+    "recommended_price": "Estimated from perceived value, positioning, and merchant context.",
+    "marketing_plan": "Built around simple launch actions a merchant can execute quickly.",
+}
 
 token_store = {
     "access_token": ACCESS_TOKEN,
@@ -100,273 +114,11 @@ def nested(data, *keys):
     return current
 
 
-def resolve_local_path(raw_path):
-    if not raw_path:
-        return None
-
-    path = Path(raw_path)
-    if path.is_absolute() and path.exists():
-        return str(path)
-
-    cwd_path = Path.cwd() / path
-    if cwd_path.exists():
-        return str(cwd_path)
-
-    backend_path = BASE_DIR / path
-    if backend_path.exists():
-        return str(backend_path)
-
-    return str(backend_path)
+# Local persistence is intentionally disabled for now. The dashboard reads
+# orders, products, and alerts directly from Zid so Zid stays the source of truth.
 
 
-class SQLiteStore:
-    mode = "sqlite"
-
-    def __init__(self):
-        self.db_path = BASE_DIR / "sandbox.db"
-        self._init_db()
-
-    def _connect(self):
-        return sqlite3.connect(self.db_path)
-
-    def _init_db(self):
-        with self._connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS orders (
-                    order_id TEXT PRIMARY KEY,
-                    customer_name TEXT,
-                    total REAL,
-                    status TEXT,
-                    payload TEXT,
-                    items TEXT,
-                    created_at TEXT
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS alerts (
-                    id TEXT PRIMARY KEY,
-                    product_id TEXT,
-                    product_name TEXT,
-                    sku TEXT,
-                    current_stock REAL,
-                    threshold REAL,
-                    sold_quantity REAL,
-                    sales_velocity REAL,
-                    severity_score REAL,
-                    source TEXT,
-                    updated_at TEXT,
-                    payload TEXT
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS product_drafts (
-                    id TEXT PRIMARY KEY,
-                    payload TEXT,
-                    created_at TEXT
-                )
-                """
-            )
-            conn.commit()
-
-    def status(self):
-        return {
-            "mode": self.mode,
-            "connected": True,
-            "path": str(self.db_path),
-        }
-
-    def save_order(self, order):
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO orders
-                (order_id, customer_name, total, status, payload, items, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    order["order_id"],
-                    order.get("customer_name", "Unknown"),
-                    to_float(order.get("total")),
-                    order.get("status", "New"),
-                    json.dumps(order.get("payload", {})),
-                    json.dumps(order.get("items", [])),
-                    order.get("created_at", now_iso()),
-                ),
-            )
-            conn.commit()
-
-    def list_orders(self, limit=100):
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT order_id, customer_name, total, status, payload, items, created_at
-                FROM orders
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-
-        orders = []
-        for row in rows:
-            orders.append(
-                {
-                    "order_id": row[0],
-                    "customer_name": row[1],
-                    "total": row[2],
-                    "status": row[3],
-                    "payload": json.loads(row[4] or "{}"),
-                    "items": json.loads(row[5] or "[]"),
-                    "created_at": row[6],
-                }
-            )
-        return orders
-
-    def save_alert(self, alert):
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO alerts
-                (id, product_id, product_name, sku, current_stock, threshold,
-                 sold_quantity, sales_velocity, severity_score, source, updated_at, payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    alert["id"],
-                    alert.get("product_id"),
-                    alert.get("product_name"),
-                    alert.get("sku"),
-                    to_float(alert.get("current_stock")),
-                    to_float(alert.get("threshold")),
-                    to_float(alert.get("sold_quantity")),
-                    to_float(alert.get("sales_velocity")),
-                    to_float(alert.get("severity_score")),
-                    alert.get("source"),
-                    alert.get("updated_at", now_iso()),
-                    json.dumps(alert),
-                ),
-            )
-            conn.commit()
-
-    def delete_alert(self, alert_id):
-        with self._connect() as conn:
-            conn.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
-            conn.commit()
-
-    def list_alerts(self):
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT payload FROM alerts
-                ORDER BY severity_score DESC, current_stock ASC
-                """
-            ).fetchall()
-
-        return [json.loads(row[0] or "{}") for row in rows]
-
-    def save_draft(self, draft):
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO product_drafts (id, payload, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (draft["draft_id"], json.dumps(draft), draft.get("created_at", now_iso())),
-            )
-            conn.commit()
-
-
-class FirestoreStore:
-    mode = "firestore"
-
-    def __init__(self):
-        if firebase_admin is None:
-            raise RuntimeError("firebase-admin is not installed")
-
-        if not firebase_admin._apps:
-            service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-            service_account_file = (
-                os.getenv("FIREBASE_SERVICE_ACCOUNT_FILE")
-                or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            )
-            project_id = os.getenv("FIREBASE_PROJECT_ID")
-            options = {"projectId": project_id} if project_id else None
-
-            if service_account_json:
-                cred = credentials.Certificate(json.loads(service_account_json))
-                firebase_admin.initialize_app(cred, options=options)
-            elif service_account_file:
-                cred = credentials.Certificate(resolve_local_path(service_account_file))
-                firebase_admin.initialize_app(cred, options=options)
-            else:
-                firebase_admin.initialize_app(options=options)
-
-        self.client = firestore.client()
-        self.store_id = ZID_STORE_ID or "local"
-
-    def _collection(self, name):
-        return (
-            self.client.collection("stores")
-            .document(str(self.store_id))
-            .collection(name)
-        )
-
-    def status(self):
-        return {
-            "mode": self.mode,
-            "connected": True,
-            "store_id": self.store_id,
-            "project_id": os.getenv("FIREBASE_PROJECT_ID"),
-        }
-
-    def save_order(self, order):
-        self._collection("orders").document(str(order["order_id"])).set(order)
-
-    def list_orders(self, limit=100):
-        docs = self._collection("orders").stream()
-        orders = [doc.to_dict() or {} for doc in docs]
-        orders.sort(key=lambda item: item.get("created_at", ""), reverse=True)
-        return orders[:limit]
-
-    def save_alert(self, alert):
-        self._collection("alerts").document(str(alert["id"])).set(alert)
-
-    def delete_alert(self, alert_id):
-        self._collection("alerts").document(str(alert_id)).delete()
-
-    def list_alerts(self):
-        docs = self._collection("alerts").stream()
-        alerts = [doc.to_dict() or {} for doc in docs]
-        alerts.sort(
-            key=lambda item: (
-                to_float(item.get("severity_score")),
-                -to_float(item.get("current_stock")),
-            ),
-            reverse=True,
-        )
-        return alerts
-
-    def save_draft(self, draft):
-        self._collection("product_drafts").document(str(draft["draft_id"])).set(draft)
-
-
-def build_store():
-    try:
-        return FirestoreStore(), None
-    except Exception as exc:
-        return SQLiteStore(), str(exc)
-
-
-storage, storage_warning = build_store()
-
-
-def zid_headers():
+def zid_headers(content_type="application/json"):
     manager_token = token_store.get("access_token") or ACCESS_TOKEN
     authorization = token_store.get("authorization") or AUTHORIZATION_TOKEN
 
@@ -378,9 +130,10 @@ def zid_headers():
     headers = {
         "Accept": "application/json",
         "Accept-Language": "ar",
-        "Content-Type": "application/json",
         "Role": "Manager",
     }
+    if content_type:
+        headers["Content-Type"] = content_type
 
     if manager_token:
         headers["X-Manager-Token"] = manager_token
@@ -398,7 +151,73 @@ def zid_ready():
     return bool((token_store.get("access_token") or ACCESS_TOKEN) and ZID_STORE_ID)
 
 
+def zid_status():
+    return {
+        "source": "zid_api",
+        "connected": zid_ready(),
+        "store_id_available": bool(ZID_STORE_ID),
+        "token_available": bool(token_store.get("access_token") or ACCESS_TOKEN),
+        "api_base": ZID_API_BASE,
+    }
+
+
+async def zid_request(path, params=None, method="GET", json_body=None):
+    if not zid_ready():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Zid ACCESS_TOKEN/ZID_ACCESS_TOKEN and ZID_STORE_ID/STORE_ID",
+        )
+
+    url = f"{ZID_API_BASE}{path}"
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method,
+            url,
+            headers=zid_headers(),
+            params=params,
+            json=json_body,
+            timeout=20,
+        )
+
+    if response.status_code == 401:
+        raise HTTPException(status_code=401, detail="Zid API: Unauthorized. Re-authenticate via /auth/login")
+    if response.status_code == 429:
+        raise HTTPException(status_code=429, detail="Zid API: Rate limit hit. Try again shortly.")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+
+    return response.json()
+
+
+def payload_list(payload, *keys):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+
+    search_keys = keys or ("data", "payload", "results", "orders", "products")
+    for key in search_keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            found = payload_list(value, *search_keys)
+            if found:
+                return found
+
+    return []
+
+
+def localized_text(value, default="-"):
+    if isinstance(value, dict):
+        return first_value(value.get("ar"), value.get("en"), *value.values(), default=default)
+    return first_value(value, default=default)
+
+
 def get_order_data(payload):
+    if not isinstance(payload, dict):
+        return {}
+
     return (
         payload.get("data")
         or payload.get("order")
@@ -491,27 +310,20 @@ def extract_stock_from_product(product):
     return None
 
 
-async def fetch_zid_product(product_id):
-    if not product_id or not zid_ready():
-        return None
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{ZID_API_BASE}/products/{product_id}/",
-            headers=zid_headers(),
-            timeout=15,
-        )
-
-    if response.status_code >= 400:
-        return None
-
-    return response.json()
-
-
 def order_summary(payload):
     data = get_order_data(payload)
     customer = data.get("customer") if isinstance(data.get("customer"), dict) else {}
     totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
+    status = data.get("status") if isinstance(data.get("status"), str) else None
+    order_status = data.get("order_status")
+    order_status_code = None
+    order_status_name = None
+    if isinstance(order_status, dict):
+        order_status_code = order_status.get("code")
+        order_status_name = order_status.get("name")
+        order_status = first_value(order_status_name, order_status_code)
+
+    display_status = data.get("display_status") if isinstance(data.get("display_status"), dict) else {}
 
     return {
         "order_id": str(first_value(data.get("id"), data.get("order_id"), uuid.uuid4())),
@@ -521,19 +333,86 @@ def order_summary(payload):
             nested(data, "customer", "full_name"),
             default="Unknown",
         ),
-        "total": to_float(first_value(totals.get("total"), data.get("total"), data.get("grand_total"))),
-        "status": first_value(data.get("status"), data.get("order_status"), default="New"),
+        "total": to_float(
+            first_value(
+                totals.get("total"),
+                data.get("order_total"),
+                data.get("total"),
+                data.get("grand_total"),
+            )
+        ),
+        "status": first_value(status, order_status, default="New"),
+        "status_code": first_value(order_status_code, display_status.get("code"), status),
+        "status_name": first_value(order_status_name, display_status.get("name"), status, default="New"),
+        "display_status": {
+            "code": display_status.get("code"),
+            "name": display_status.get("name"),
+            "color": display_status.get("color"),
+        },
+        "payment_status": data.get("payment_status"),
         "items": extract_order_items(data),
         "payload": payload,
-        "created_at": now_iso(),
+        "created_at": first_value(
+            data.get("created_at"),
+            data.get("created_date"),
+            data.get("date_created"),
+            data.get("updated_at"),
+            default=now_iso(),
+        ),
     }
 
 
-def sales_velocity_for(product_id, sku):
+def normalize_product(product):
+    if not isinstance(product, dict):
+        return {}
+
+    data = product.get("data") if isinstance(product.get("data"), dict) else product
+    product_id = first_value(data.get("id"), data.get("uuid"), data.get("product_id"))
+    name = localized_text(first_value(data.get("name"), data.get("title"), default="Unknown product"))
+    stock = extract_stock_from_product(data)
+
+    return {
+        "id": str(product_id) if product_id is not None else None,
+        "product_id": str(product_id) if product_id is not None else None,
+        "product_name": name,
+        "name": name,
+        "sku": first_value(data.get("sku"), data.get("SKU")),
+        "price": to_float(first_value(data.get("price"), data.get("sale_price"))),
+        "current_stock": stock,
+        "is_infinite": bool(data.get("is_infinite")),
+        "is_published": data.get("is_published"),
+        "raw": product,
+    }
+
+
+async def fetch_zid_orders(limit=100, payload_type="default"):
+    payload = await zid_request(
+        "/managers/store/orders/",
+        params={
+            "store_id": ZID_STORE_ID,
+            "per_page": limit,
+            "payload_type": payload_type,
+            "sort_by": "desc",
+        },
+    )
+    raw_orders = payload_list(payload, "orders", "data", "payload", "results")
+    return [order_summary(order) for order in raw_orders[:limit]]
+
+
+async def fetch_zid_products(limit=100):
+    payload = await zid_request(
+        "/products/",
+        params={"page_size": limit, "extended": "true"},
+    )
+    raw_products = payload_list(payload, "results", "products", "data", "payload")
+    return [product for product in (normalize_product(item) for item in raw_products[:limit]) if product]
+
+
+def sales_velocity_for(orders, product_id, sku):
     sold_quantity = 0
     matching_dates = []
 
-    for order in storage.list_orders(limit=1000):
+    for order in orders:
         for item in order.get("items", []):
             same_product = product_id and item.get("product_id") == product_id
             same_sku = sku and item.get("sku") == sku
@@ -558,53 +437,51 @@ def sales_velocity_for(product_id, sku):
     return sold_quantity, round(sold_quantity / days, 2)
 
 
-async def update_low_stock_alerts(order):
-    alerts_changed = []
+async def build_low_stock_alerts():
+    products = await fetch_zid_products(limit=100)
+    try:
+        orders = await fetch_zid_orders(limit=100, payload_type="default")
+    except HTTPException:
+        orders = []
 
-    for item in order.get("items", []):
-        product_id = item.get("product_id")
-        sku = item.get("sku")
-        stock = item.get("current_stock")
-        source = "webhook"
-
-        if stock is None and product_id:
-            product = await fetch_zid_product(product_id)
-            stock = extract_stock_from_product(product)
-            source = "zid_product_api" if stock is not None else "webhook"
-
-        alert_id = product_id or sku
-        if not alert_id:
+    alerts = []
+    for product in products:
+        stock = product.get("current_stock")
+        if stock is None or product.get("is_infinite") or stock > LOW_STOCK_THRESHOLD:
             continue
 
-        if stock is None:
-            continue
+        product_id = product.get("product_id")
+        sku = product.get("sku")
+        sold_quantity, velocity = sales_velocity_for(orders, product_id, sku)
+        severity_score = ((LOW_STOCK_THRESHOLD - stock) + 1) * 10 + velocity
 
-        sold_quantity, velocity = sales_velocity_for(product_id, sku)
-
-        if stock <= LOW_STOCK_THRESHOLD:
-            severity_score = ((LOW_STOCK_THRESHOLD - stock) + 1) * 10 + velocity
-            alert = {
-                "id": str(alert_id),
+        alerts.append(
+            {
+                "id": str(product_id or sku),
                 "product_id": product_id,
-                "product_name": item.get("product_name") or "Unknown product",
+                "product_name": product.get("product_name") or "Unknown product",
                 "sku": sku,
                 "current_stock": stock,
                 "threshold": LOW_STOCK_THRESHOLD,
                 "sold_quantity": sold_quantity,
                 "sales_velocity": velocity,
                 "severity_score": round(severity_score, 2),
-                "source": source,
+                "source": "zid_products_api",
                 "updated_at": now_iso(),
             }
-            storage.save_alert(alert)
-            alerts_changed.append(alert)
-        else:
-            storage.delete_alert(str(alert_id))
+        )
 
-    return alerts_changed
+    alerts.sort(
+        key=lambda item: (
+            to_float(item.get("severity_score")),
+            -to_float(item.get("current_stock")),
+        ),
+        reverse=True,
+    )
+    return alerts
 
 
-def mock_product_draft(image_url, tone):
+def legacy_mock_product_draft(image_url, tone, product_details=""):
     tone_label = {
         "playful": "Playful",
         "friendly": "Friendly",
@@ -621,17 +498,26 @@ def mock_product_draft(image_url, tone):
         "Bilingual copy ready for Zid product pages",
         "Short selling points for faster review",
     ]
+    details = product_details or "Generated from the uploaded product image."
 
     return {
         "draft_id": draft_id,
         "mode": "mock",
         "image_url": image_url,
         "tone": tone,
+        "product_details": product_details,
+        "trendy_name": name_en,
+        "trendy_name_arabic": name_ar,
         "name": name_ar,
         "name_ar": name_ar,
         "name_en": name_en,
+        "description": f"A clean product description draft based on: {details}",
         "description_ar": "وصف عربي مبدئي للمنتج يمكنك تعديله قبل النشر في متجرك.",
-        "description_en": "A clean product description draft you can review, edit, and publish to your Zid store.",
+        "description_en": f"A clean product description draft based on: {details}",
+        "marketing_audience": "Online shoppers looking for practical, well-presented products.",
+        "marketing_partners": ["Zid store", "Social media creators", "Local retail partners"],
+        "recommended_price": 99,
+        "marketing_plan": "Launch with a clear product page, short social clips, and a limited-time opening offer.",
         "bullets": bullets,
         "tags": ["zid", "ai-generated", str(tone).lower()],
         "price": 99,
@@ -642,20 +528,98 @@ def mock_product_draft(image_url, tone):
     }
 
 
-async def generate_ai_product_draft(image_url, tone):
+def normalize_ai_draft(raw, image_url="", tone="professional", product_details="", mode="gemini"):
+    source = raw if isinstance(raw, dict) else {}
+    normalized = {
+        "draft_id": str(source.get("draft_id") or uuid.uuid4()),
+        "mode": mode,
+        "image_url": image_url,
+        "tone": tone,
+        "product_details": product_details,
+        "created_at": source.get("created_at") or now_iso(),
+    }
+
+    fallback = mock_product_draft(image_url, tone, product_details)
+    for key in AI_PRODUCT_FIELDS:
+        value = source.get(key, fallback.get(key))
+        if key == "marketing_partners":
+            if isinstance(value, str):
+                value = [item.strip() for item in value.split(",") if item.strip()]
+            if not isinstance(value, list):
+                value = fallback[key]
+        normalized[key] = value
+
+    explanations = source.get("explanations")
+    if not isinstance(explanations, dict):
+        explanations = source.get("field_explanations")
+    if not isinstance(explanations, dict):
+        explanations = {}
+
+    normalized["explanations"] = {
+        key: first_value(
+            explanations.get(key),
+            source.get(f"{key}_explanation"),
+            AI_EXPLANATION_FALLBACKS[key],
+        )
+        for key in AI_PRODUCT_FIELDS
+    }
+    return normalized
+
+
+def mock_product_draft(image_url, tone, product_details=""):
+    tone_label = {
+        "playful": "Playful",
+        "friendly": "Friendly",
+        "luxury": "Luxury",
+        "professional": "Professional",
+        "energetic": "Energetic",
+    }.get(str(tone).lower(), "Professional")
+    details = product_details or "the uploaded product image"
+    draft = {
+        "trendy_name": f"{tone_label} AI Product",
+        "trendy_name_arabic": "AI product ready for sale",
+        "description": f"A clear product description based on {details}.",
+        "description_arabic": f"Arabic product description based on {details}.",
+        "marketing_audience": "Online shoppers looking for practical, well-presented products.",
+        "marketing_partners": ["Zid store", "Social media creators", "Local retail partners"],
+        "recommended_price": 99,
+        "marketing_plan": "Launch with a clear product page, short social clips, and a limited-time opening offer.",
+    }
+    draft["explanations"] = {key: AI_EXPLANATION_FALLBACKS[key] for key in AI_PRODUCT_FIELDS}
+    draft.update(
+        {
+            "draft_id": str(uuid.uuid4()),
+            "mode": "mock",
+            "image_url": image_url,
+            "tone": tone,
+            "product_details": product_details,
+            "created_at": now_iso(),
+        }
+    )
+    return draft
+
+
+async def generate_ai_product_draft(image_url, tone, product_details=""):
     if not GEMINI_API_KEY or genai is None:
-        return mock_product_draft(image_url, tone)
+        return mock_product_draft(image_url, tone, product_details)
 
     prompt = f"""
-Create a Zid ecommerce product draft from this product image URL:
+Create a Zid ecommerce product draft from this product image input:
 {image_url}
 
 Tone: {tone}
+Product details from the merchant:
+{product_details or "No extra details provided."}
 
 Return JSON only with these keys:
-name_ar, name_en, description_ar, description_en, bullets, tags, price,
-seo_title_ar, seo_title_en.
-Bullets and tags must be arrays. Arabic and English output are both required.
+trendy_name, trendy_name_arabic, description, description_arabic,
+marketing_audience, marketing_partners, recommended_price, marketing_plan,
+explanations.
+marketing_partners must be an array of strings.
+explanations must be an object with one short reason for each field:
+trendy_name, trendy_name_arabic, description, description_arabic,
+marketing_audience, marketing_partners, recommended_price, marketing_plan.
+Arabic and English output are both required. Do not include extra keys.
 """
 
     try:
@@ -668,39 +632,171 @@ Bullets and tags must be arrays. Arabic and English output are both required.
             text = text.replace("json\n", "", 1).replace("JSON\n", "", 1)
 
         parsed = json.loads(text)
-        draft = mock_product_draft(image_url, tone)
-        draft.update(parsed)
-        draft["mode"] = "gemini"
-        return draft
+        return normalize_ai_draft(parsed, image_url, tone, product_details, mode="gemini")
     except Exception:
-        return mock_product_draft(image_url, tone)
+        return mock_product_draft(image_url, tone, product_details)
+
+
+def product_id_from_response(product_response):
+    if not isinstance(product_response, dict):
+        return None
+    product = product_response.get("product") if isinstance(product_response.get("product"), dict) else product_response
+    return first_value(product.get("id"), product.get("uuid"), product.get("product_id"))
+
+
+def data_url_to_upload(image_url):
+    if not image_url or not str(image_url).startswith("data:image/"):
+        return None
+
+    header, _, encoded = str(image_url).partition(",")
+    if not encoded:
+        return None
+
+    mime_type = header.split(";", 1)[0].replace("data:", "") or "image/jpeg"
+    extension = {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif",
+    }.get(mime_type, "jpg")
+
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+    return f"product-image.{extension}", content, mime_type
+
+
+async def upload_product_image(product_id, image_url, alt_text):
+    upload = data_url_to_upload(image_url)
+    if not product_id or upload is None:
+        return None
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{ZID_API_BASE}/products/{product_id}/images/",
+            headers=zid_headers(content_type=None),
+            files={"image": upload},
+            data={"alt_text": alt_text or "Product image"},
+            timeout=30,
+        )
+
+    if response.status_code >= 400:
+        return {
+            "uploaded": False,
+            "status_code": response.status_code,
+            "detail": response.text,
+        }
+
+    return {
+        "uploaded": True,
+        "data": response.json(),
+    }
 
 
 def product_payload_for_zid(draft):
-    name = first_value(
+    name_ar = first_value(
+        draft.get("trendy_name_arabic"),
         draft.get("name_ar"),
         draft.get("name"),
-        draft.get("name_en"),
+        draft.get("trendy_name"),
         default="AI generated product",
     )
-    description = first_value(
+    name_en = first_value(
+        draft.get("trendy_name"),
+        draft.get("name_en"),
+        draft.get("name"),
+        draft.get("trendy_name_arabic"),
+        default=name_ar,
+    )
+    description_ar = first_value(
+        draft.get("description_arabic"),
         draft.get("description_ar"),
         draft.get("description"),
-        draft.get("description_en"),
         default="Generated product description",
     )
-    price = to_float(first_value(draft.get("price"), draft.get("suggested_price")), 99)
+    description_en = first_value(
+        draft.get("description"),
+        draft.get("description_en"),
+        draft.get("description_arabic"),
+        default=description_ar,
+    )
+    price = to_float(first_value(draft.get("recommended_price"), draft.get("price"), draft.get("suggested_price")), 99)
+    is_infinite = bool(draft.get("is_infinite", False))
 
-    return {
-        "name": name,
-        "description": description,
+    payload = {
+        "name": {
+            "ar": str(name_ar),
+            "en": str(name_en),
+        },
+        "description": {
+            "ar": str(description_ar),
+            "en": str(description_en),
+        },
         "price": price,
         "sku": draft.get("sku") or f"AI-{uuid.uuid4().hex[:8].upper()}",
         "requires_shipping": True,
         "is_draft": False,
-        "is_infinite": False,
+        "is_infinite": is_infinite,
         "is_taxable": True,
     }
+
+    sale_price = first_value(draft.get("sale_price"), draft.get("discount_price"))
+    if sale_price not in (None, ""):
+        payload["sale_price"] = to_float(sale_price)
+
+    quantity = first_value(draft.get("quantity"), draft.get("stock"), draft.get("available_quantity"))
+    if not is_infinite and quantity not in (None, ""):
+        payload["quantity"] = to_int(quantity, 0)
+
+    return payload
+
+
+def validate_publish_draft(draft):
+    name = first_value(
+        draft.get("trendy_name_arabic"),
+        draft.get("trendy_name"),
+        draft.get("name_ar"),
+        draft.get("name_en"),
+        draft.get("name"),
+    )
+    price = first_value(draft.get("recommended_price"), draft.get("price"), draft.get("suggested_price"))
+    stock = first_value(draft.get("stock"), draft.get("quantity"), draft.get("available_quantity"))
+
+    if not str(name or "").strip():
+        raise HTTPException(status_code=400, detail="Product name is required")
+    if price in (None, ""):
+        raise HTTPException(status_code=400, detail="Product price is required")
+    if to_float(price, None) is None or to_float(price) < 0:
+        raise HTTPException(status_code=400, detail="Product price must be 0 or greater")
+    if stock in (None, ""):
+        raise HTTPException(status_code=400, detail="Product stock is required")
+    if to_int(stock, None) is None or to_int(stock) < 0:
+        raise HTTPException(status_code=400, detail="Product stock must be 0 or greater")
+
+
+async def update_zid_product_stock(product_id, new_stock):
+    update_payload = {
+        "quantity": to_int(new_stock, 0),
+        "is_infinite": False,
+    }
+    last_error = None
+
+    for method in ("PATCH", "PUT"):
+        try:
+            return await zid_request(
+                f"/products/{product_id}/",
+                method=method,
+                json_body=update_payload,
+            )
+        except HTTPException as exc:
+            if exc.status_code in (401, 429):
+                raise
+            last_error = exc
+
+    raise last_error or HTTPException(status_code=502, detail="Could not update product stock in Zid")
 
 
 @app.get("/")
@@ -709,18 +805,17 @@ def read_root():
         "status": "online",
         "oauth_configured": bool(ZID_CLIENT_ID),
         "token_available": bool(token_store.get("access_token")),
-        "storage": storage.status(),
-        "storage_warning": storage_warning,
+        "data_source": zid_status(),
         "message": "Zid Automation API is running",
     }
 
 
-@app.get("/api/storage/status")
-def storage_status():
+@app.get("/api/source/status")
+def source_status():
     return {
         "status": "success",
-        "data": storage.status(),
-        "warning": storage_warning,
+        "data": zid_status(),
+        "warning": None,
     }
 
 
@@ -822,31 +917,35 @@ def auth_status():
 async def receive_order_webhook(request: Request):
     payload = await request.json()
     order = order_summary(payload)
-    storage.save_order(order)
-    alerts_changed = await update_low_stock_alerts(order)
 
     return {
         "status": "success",
-        "message": f"Order {order['order_id']} received.",
+        "message": f"Order {order['order_id']} received. Dashboard data is read from Zid API.",
         "order": {
             "order_id": order["order_id"],
             "customer_name": order["customer_name"],
             "total": order["total"],
+            "status": order["status"],
+            "status_code": order.get("status_code"),
             "items_count": len(order["items"]),
         },
-        "alerts_changed": alerts_changed,
+        "alerts_changed": [],
     }
 
 
 @app.get("/api/orders")
-def get_orders():
-    orders = storage.list_orders(limit=100)
+async def get_orders():
+    orders = await fetch_zid_orders(limit=100, payload_type="simple")
     return [
         {
             "order_id": order.get("order_id"),
             "customer_name": order.get("customer_name", "Unknown"),
             "total": order.get("total", 0.0),
             "status": order.get("status", "New"),
+            "status_code": order.get("status_code"),
+            "status_name": order.get("status_name", order.get("status", "New")),
+            "display_status": order.get("display_status", {}),
+            "payment_status": order.get("payment_status"),
             "items_count": len(order.get("items", [])),
             "created_at": order.get("created_at"),
         }
@@ -855,63 +954,37 @@ def get_orders():
 
 
 @app.get("/api/alerts")
-def get_alerts():
+async def get_alerts():
+    alerts = await build_low_stock_alerts()
     return {
         "status": "success",
-        "alerts": storage.list_alerts(),
+        "alerts": alerts,
         "threshold": LOW_STOCK_THRESHOLD,
     }
 
 
 @app.post("/api/alerts/recalculate")
 async def recalculate_alerts():
-    changed = []
-    for order in storage.list_orders(limit=1000):
-        changed.extend(await update_low_stock_alerts(order))
+    alerts = await build_low_stock_alerts()
 
     return {
         "status": "success",
-        "alerts_changed": changed,
-        "alerts": storage.list_alerts(),
+        "alerts_changed": alerts,
+        "alerts": alerts,
     }
 
 
 @app.get("/api/zid/orders")
 async def get_zid_orders():
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{ZID_API_BASE}/managers/store/orders/",
-            headers=zid_headers(),
-            params={"store_id": ZID_STORE_ID},
-            timeout=15,
-        )
-
-    if response.status_code == 401:
-        raise HTTPException(status_code=401, detail="Zid API: Unauthorized. Re-authenticate via /auth/login")
-    if response.status_code == 429:
-        raise HTTPException(status_code=429, detail="Zid API: Rate limit hit. Try again shortly.")
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-
-    return response.json()
+    return await zid_request(
+        "/managers/store/orders/",
+        params={"store_id": ZID_STORE_ID, "payload_type": "default"},
+    )
 
 
 @app.get("/api/zid/products")
 async def get_zid_products():
-    if not zid_ready():
-        raise HTTPException(status_code=400, detail="Missing Zid token or store id")
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{ZID_API_BASE}/products/",
-            headers=zid_headers(),
-            timeout=15,
-        )
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-
-    return response.json()
+    return await zid_request("/products/", params={"extended": "true"})
 
 
 @app.post("/api/products/ai-create")
@@ -919,12 +992,12 @@ async def ai_create_product(request: Request):
     body = await request.json()
     image_url = body.get("image_url")
     tone = body.get("tone", "professional")
+    product_details = body.get("product_details") or ""
 
     if not image_url:
         raise HTTPException(status_code=400, detail="image_url is required")
 
-    draft = await generate_ai_product_draft(image_url, tone)
-    storage.save_draft(draft)
+    draft = await generate_ai_product_draft(image_url, tone, product_details)
 
     return {
         "status": "success",
@@ -936,6 +1009,7 @@ async def ai_create_product(request: Request):
 @app.post("/api/products/publish")
 async def publish_product(request: Request):
     draft = await request.json()
+    validate_publish_draft(draft)
 
     if not zid_ready():
         raise HTTPException(
@@ -944,24 +1018,71 @@ async def publish_product(request: Request):
         )
 
     payload = product_payload_for_zid(draft)
+    product_response = await zid_request(
+        "/products/",
+        method="POST",
+        json_body=payload,
+    )
+    product_id = product_id_from_response(product_response)
+    image_result = await upload_product_image(
+        product_id,
+        draft.get("image_url"),
+        first_value(draft.get("trendy_name"), draft.get("name_en"), draft.get("name")),
+    )
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{ZID_API_BASE}/products/",
-            headers=zid_headers(),
-            json=payload,
-            timeout=20,
-        )
-
-    if response.status_code not in (200, 201):
-        raise HTTPException(status_code=response.status_code, detail=response.text)
+    verified_product = None
+    if product_id:
+        try:
+            verified_product = await zid_request(f"/products/{product_id}/")
+        except HTTPException:
+            verified_product = None
 
     return {
         "status": "success",
         "message": "Product published to Zid",
         "zid_payload": payload,
-        "zid_response": response.json(),
+        "zid_response": product_response,
+        "product_id": product_id,
+        "image_upload": image_result,
+        "store_product": verified_product,
     }
+
+
+@app.post("/api/products/{product_id}/stock/add")
+async def add_product_stock(product_id: str, request: Request):
+    body = await request.json()
+    amount = to_int(body.get("amount"), 0)
+
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Stock amount must be greater than 0")
+    if not zid_ready():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Zid ACCESS_TOKEN/ZID_ACCESS_TOKEN or ZID_STORE_ID/STORE_ID",
+        )
+
+    product_response = await zid_request(f"/products/{product_id}/")
+    current_stock = extract_stock_from_product(product_response)
+    if current_stock is None:
+        current_stock = 0
+
+    new_stock = to_int(current_stock, 0) + amount
+    update_response = await update_zid_product_stock(product_id, new_stock)
+
+    return {
+        "status": "success",
+        "message": f"Stock increased by {amount}.",
+        "product_id": product_id,
+        "previous_stock": current_stock,
+        "added_stock": amount,
+        "new_stock": new_stock,
+        "zid_response": update_response,
+    }
+
+
+@app.post("/api/products/create")
+async def create_product(request: Request):
+    return await publish_product(request)
 
 
 # To run: .\venv\Scripts\python -m uvicorn main:app --reload

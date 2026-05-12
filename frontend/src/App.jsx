@@ -14,9 +14,12 @@ import {
   MenuItem,
   Paper,
   Select,
+  Snackbar,
   Stack,
   TextField,
   ThemeProvider,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from '@mui/material'
 import { themeParcel } from '@zidsa/zidmui/theme/theme'
@@ -42,8 +45,33 @@ const draftPlaceholders = {
   marketing_audience: 'Primary audience placeholder',
   marketing_partners: ['Partner placeholder 1', 'Partner placeholder 2'],
   recommended_price: '0',
+  stock: '',
   marketing_plan: 'Marketing plan placeholder',
 }
+
+const emptyDraft = {
+  trendy_name: '',
+  trendy_name_arabic: '',
+  description: '',
+  description_arabic: '',
+  marketing_audience: '',
+  marketing_partners: [],
+  recommended_price: '',
+  stock: '',
+  marketing_plan: '',
+}
+
+const draftFieldKeys = [
+  'trendy_name',
+  'trendy_name_arabic',
+  'description',
+  'description_arabic',
+  'marketing_audience',
+  'marketing_partners',
+  'recommended_price',
+  'stock',
+  'marketing_plan',
+]
 
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -54,22 +82,85 @@ function readFileAsDataUrl(file) {
   })
 }
 
+function fieldValue(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value.value ?? value.text ?? value.content ?? value.copy ?? ''
+  }
+  return value
+}
+
+function firstDraftValue(source, keys, fallback) {
+  for (const key of keys) {
+    const value = fieldValue(source?.[key])
+    if (value !== undefined && value !== null && value !== '') return value
+  }
+  return fallback
+}
+
+function priceValue(value, fallback = '') {
+  const raw = fieldValue(value)
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return priceValue(raw.amount ?? raw.price ?? raw.value ?? raw.text, fallback)
+  }
+  if (raw === undefined || raw === null || raw === '') return fallback
+  const match = String(raw).match(/\d+(?:[.,]\d+)?/)
+  return match ? match[0].replace(',', '.') : String(raw)
+}
+
+function extractFieldExplanations(payload) {
+  const source = payload?.data || payload?.product || payload || {}
+  const explanations = {}
+  const containers = [
+    source.explanations,
+    source.field_explanations,
+    source.fieldExplanations,
+    source.field_notes,
+    source.fieldNotes,
+  ]
+
+  containers.forEach((container) => {
+    if (!container || typeof container !== 'object' || Array.isArray(container)) return
+    draftFieldKeys.forEach((key) => {
+      const value = fieldValue(container[key])
+      if (value) explanations[key] = String(value)
+    })
+  })
+
+  draftFieldKeys.forEach((key) => {
+    const field = source[key]
+    const embedded = field && typeof field === 'object' && !Array.isArray(field)
+      ? field.explanation || field.reason || field.helper || field.note
+      : ''
+    const sibling = source[`${key}_explanation`] || source[`${key}_reason`] || source[`${key}_helper`]
+    const value = fieldValue(embedded || sibling)
+    if (value) explanations[key] = String(value)
+  })
+
+  return explanations
+}
+
 function normalizeDraft(payload) {
   const source = payload?.data || payload?.product || payload || {}
-  const trendName = source.trendy_name || source.name_en || source.name || draftPlaceholders.trendy_name
-  const trendNameArabic = source.trendy_name_arabic || source.name_ar || source.name || draftPlaceholders.trendy_name_arabic
-  const description = source.description || source.description_en || draftPlaceholders.description
-  const descriptionArabic = source.description_arabic || source.description_ar || draftPlaceholders.description_arabic
-  const marketingPartners = Array.isArray(source.marketing_partners)
-    ? source.marketing_partners
-    : Array.isArray(source.partners)
-      ? source.partners
-      : Array.isArray(source.tags)
-        ? source.tags
+  const trendName = firstDraftValue(source, ['trendy_name', 'name_en', 'name'], draftPlaceholders.trendy_name)
+  const trendNameArabic = firstDraftValue(source, ['trendy_name_arabic', 'name_ar', 'name'], draftPlaceholders.trendy_name_arabic)
+  const description = firstDraftValue(source, ['description', 'description_en'], draftPlaceholders.description)
+  const descriptionArabic = firstDraftValue(source, ['description_arabic', 'description_ar'], draftPlaceholders.description_arabic)
+  const sourcePartners = fieldValue(source.marketing_partners)
+  const sourcePartnerFallback = fieldValue(source.partners)
+  const sourceTags = fieldValue(source.tags)
+  const marketingPartners = Array.isArray(sourcePartners)
+    ? sourcePartners
+    : Array.isArray(sourcePartnerFallback)
+      ? sourcePartnerFallback
+      : Array.isArray(sourceTags)
+        ? sourceTags
         : draftPlaceholders.marketing_partners
-  const recommendedPrice = source.recommended_price || source.price || draftPlaceholders.recommended_price
-  const marketingPlan = source.marketing_plan || source.bullets || draftPlaceholders.marketing_plan
-  const marketingAudience = source.marketing_audience || source.audience || draftPlaceholders.marketing_audience
+  const recommendedPrice = priceValue(
+    firstDraftValue(source, ['recommended_price', 'price', 'suggested_price'], draftPlaceholders.recommended_price),
+    draftPlaceholders.recommended_price,
+  )
+  const marketingPlan = firstDraftValue(source, ['marketing_plan', 'bullets'], draftPlaceholders.marketing_plan)
+  const marketingAudience = firstDraftValue(source, ['marketing_audience', 'audience'], draftPlaceholders.marketing_audience)
 
   return {
     trendy_name: trendName,
@@ -79,6 +170,7 @@ function normalizeDraft(payload) {
     marketing_audience: marketingAudience,
     marketing_partners: marketingPartners,
     recommended_price: recommendedPrice,
+    stock: '',
     marketing_plan: marketingPlan,
     name_ar: trendNameArabic,
     name_en: trendName,
@@ -138,10 +230,31 @@ function Stat({ label, value, tone = 'default' }) {
   )
 }
 
+function FieldWithReason({ reason, children }) {
+  return (
+    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems="stretch">
+      <Box sx={{ flex: 1 }}>{children}</Box>
+      <Box sx={{ width: { xs: '100%', sm: 180 }, p: 1.25, border: '1px solid #e5e7eb', borderRadius: 1.5, bgcolor: '#f8fafc' }}>
+        <Typography variant="caption" sx={{ color: '#475467', fontWeight: 700 }}>
+          Why
+        </Typography>
+        <Typography variant="body2" sx={{ color: '#344054', mt: 0.5 }}>
+          {reason || 'Add this manually or generate with AI to see the reason.'}
+        </Typography>
+      </Box>
+    </Stack>
+  )
+}
+
+function MaybeFieldWithReason({ showReason, reason, children }) {
+  if (!showReason) return children
+  return <FieldWithReason reason={reason}>{children}</FieldWithReason>
+}
+
 function App() {
   const [orders, setOrders] = useState([])
   const [alerts, setAlerts] = useState([])
-  const [storage, setStorage] = useState(null)
+  const [dataSource, setDataSource] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -150,15 +263,20 @@ function App() {
   const [selectedImageName, setSelectedImageName] = useState('')
   const [selectedImagePreview, setSelectedImagePreview] = useState('')
   const [imageInputError, setImageInputError] = useState('')
+  const [creatorMode, setCreatorMode] = useState('ai')
   const [tone, setTone] = useState('professional')
   const [productDetails, setProductDetails] = useState('')
   const [generating, setGenerating] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [generatorError, setGeneratorError] = useState('')
   const [publishMessage, setPublishMessage] = useState('')
+  const [stockMessage, setStockMessage] = useState('')
+  const [stockAdditions, setStockAdditions] = useState({})
+  const [updatingStockId, setUpdatingStockId] = useState('')
   const [generatedRaw, setGeneratedRaw] = useState(null)
+  const [fieldExplanations, setFieldExplanations] = useState({})
   const [draftVisible, setDraftVisible] = useState(false)
-  const [draft, setDraft] = useState({ ...draftPlaceholders })
+  const [draft, setDraft] = useState({ ...emptyDraft })
 
   const totalSold = useMemo(
     () => alerts.reduce((sum, item) => sum + Number(field(item, ['sold_quantity'], 0)), 0),
@@ -170,10 +288,10 @@ function App() {
     quiet ? setRefreshing(true) : setLoading(true)
 
     try {
-      const [ordersResult, alertsResult, storageResult] = await Promise.allSettled([
+      const [ordersResult, alertsResult, sourceResult] = await Promise.allSettled([
         fetchJson('/api/orders'),
         fetchJson('/api/alerts'),
-        fetchJson('/api/storage/status'),
+        fetchJson('/api/source/status'),
       ])
 
       if (ordersResult.status === 'fulfilled') {
@@ -182,8 +300,8 @@ function App() {
       if (alertsResult.status === 'fulfilled') {
         setAlerts(asArray(alertsResult.value, 'alerts'))
       }
-      if (storageResult.status === 'fulfilled') {
-        setStorage(storageResult.value?.data || storageResult.value)
+      if (sourceResult.status === 'fulfilled') {
+        setDataSource(sourceResult.value?.data || sourceResult.value)
       }
 
       if (ordersResult.status === 'rejected' && alertsResult.status === 'rejected') {
@@ -209,7 +327,9 @@ function App() {
     setGeneratorError('')
     setPublishMessage('')
     setGeneratedRaw(null)
-    setDraftVisible(false)
+    setFieldExplanations({})
+    setStockMessage('')
+    setDraftVisible(creatorMode === 'manual')
 
     if (!file) {
       setSelectedImage(null)
@@ -249,8 +369,10 @@ function App() {
     setPublishMessage('')
     setImageInputError('')
     setGeneratedRaw(null)
+    setFieldExplanations({})
+    setStockMessage('')
     setDraftVisible(true)
-    setDraft({ ...draftPlaceholders })
+    setDraft({ ...draftPlaceholders, stock: '' })
     setGenerating(true)
 
     try {
@@ -262,10 +384,12 @@ function App() {
       })
       const normalized = normalizeDraft(payload)
       setGeneratedRaw(payload?.data || payload)
+      setFieldExplanations(extractFieldExplanations(payload))
       setDraft(normalized)
     } catch (error) {
       setGeneratorError(error.message || 'Could not generate product draft.')
-      setDraft({ ...draftPlaceholders })
+      setDraft({ ...draftPlaceholders, stock: '' })
+      setFieldExplanations({})
     } finally {
       setGenerating(false)
       setDraftVisible(true)
@@ -282,17 +406,20 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...generatedRaw,
+          ...(creatorMode === 'ai' && generatedRaw ? generatedRaw : {}),
           ...draft,
-          image_url: selectedImagePreview,
+          creator_mode: creatorMode,
+          image_url: selectedImagePreview || undefined,
           tone,
-          name: draft.trendy_name_arabic,
-          name_ar: draft.trendy_name_arabic,
+          name: draft.trendy_name_arabic || draft.trendy_name,
+          name_ar: draft.trendy_name_arabic || draft.trendy_name,
           name_en: draft.trendy_name,
-          description: draft.description_arabic,
-          description_ar: draft.description_arabic,
+          description: draft.description_arabic || draft.description,
+          description_ar: draft.description_arabic || draft.description,
           description_en: draft.description,
           price: draft.recommended_price,
+          stock: draft.stock,
+          quantity: draft.stock,
           suggested_price: draft.recommended_price,
           tags: draft.marketing_partners,
           bullets: Array.isArray(draft.marketing_plan)
@@ -304,6 +431,15 @@ function App() {
         }),
       })
       setPublishMessage('Product published to Zid.')
+      setSelectedImage(null)
+      setSelectedImageName('')
+      setSelectedImagePreview('')
+      setProductDetails('')
+      setGeneratedRaw(null)
+      setFieldExplanations({})
+      setDraft({ ...emptyDraft })
+      setCreatorMode('ai')
+      setDraftVisible(false)
     } catch (error) {
       setGeneratorError(error.message || 'Could not publish product.')
     } finally {
@@ -313,6 +449,76 @@ function App() {
 
   function updateDraft(key, value) {
     setDraft((current) => ({ ...current, [key]: value }))
+  }
+
+  function handleCreatorModeChange(_event, value) {
+    if (!value) return
+    setCreatorMode(value)
+    setGeneratorError('')
+    setPublishMessage('')
+    setGeneratedRaw(null)
+    setFieldExplanations({})
+    setDraft({ ...emptyDraft })
+    setDraftVisible(value === 'manual')
+  }
+
+  const isAiMode = creatorMode === 'ai'
+  const showDraftEditor = creatorMode === 'manual' || draftVisible
+  const hasName = Boolean((draft.trendy_name || draft.trendy_name_arabic || '').trim())
+  const hasPrice = Boolean(String(draft.recommended_price || '').trim())
+  const hasStock = Boolean(String(draft.stock || '').trim())
+  const canPublish = Boolean(
+    hasName
+      && hasPrice
+      && hasStock
+      && (creatorMode === 'manual' || draft.description)
+      && !publishing,
+  )
+
+  function draftHelperText(_key, fallback = '') {
+    return fallback
+  }
+
+  function draftReason(key) {
+    return fieldExplanations[key] || ''
+  }
+
+  function updateStockAddition(alert, value) {
+    const alertId = field(alert, ['id', 'product_id', 'sku'])
+    setStockAdditions((current) => ({ ...current, [alertId]: value }))
+  }
+
+  async function addStockFromAlert(alert) {
+    const alertId = field(alert, ['id', 'product_id', 'sku'])
+    const productId = field(alert, ['product_id', 'id'], '')
+    const amount = Number(stockAdditions[alertId])
+
+    if (!productId || !Number.isFinite(amount) || amount <= 0) {
+      setStockMessage('Enter a stock amount greater than 0.')
+      return
+    }
+
+    setUpdatingStockId(alertId)
+    setStockMessage('')
+
+    try {
+      const payload = await fetchJson(`/api/products/${encodeURIComponent(productId)}/stock/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+      })
+      setAlerts((current) => current.filter((item) => field(item, ['id', 'product_id', 'sku']) !== alertId))
+      setStockAdditions((current) => {
+        const next = { ...current }
+        delete next[alertId]
+        return next
+      })
+      setStockMessage(payload?.message || 'Stock updated and alert removed.')
+    } catch (error) {
+      setStockMessage(error.message || 'Could not update stock.')
+    } finally {
+      setUpdatingStockId('')
+    }
   }
 
   return (
@@ -328,11 +534,11 @@ function App() {
                     Zid Merchant Automation
                   </Typography>
                   <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 760 }}>
-                    Smart stock alerts from order webhooks, plus AI product descriptions ready to review and publish.
+                    Live stock alerts and recent orders from Zid, plus AI product descriptions ready to review and publish.
                   </Typography>
                 </Box>
                 <Stack direction="row" spacing={1.25} flexWrap="wrap" useFlexGap>
-
+                  <Chip label={dataSource?.source === 'zid_api' ? 'Source: Zid API' : 'Source: checking'} color={dataSource?.connected ? 'success' : 'default'} />
                   <Button variant="contained" onClick={() => loadDashboard({ quiet: true })} disabled={refreshing}>
                     {refreshing ? 'Refreshing...' : 'Refresh'}
                   </Button>
@@ -347,7 +553,7 @@ function App() {
                 <Stat label="Urgent low-stock items" value={alerts.length} tone={alerts.length ? 'danger' : 'good'} />
               </Grid>
               <Grid item xs={12} md={4}>
-                <Stat label="Recent orders stored" value={orders.length} tone="blue" />
+                <Stat label="Recent orders from Zid" value={orders.length} tone="blue" />
               </Grid>
               <Grid item xs={12} md={4}>
                 <Stat label="Units sold in alert items" value={totalSold} />
@@ -362,7 +568,7 @@ function App() {
                       Smart Stock Alert System
                     </Typography>
                     <Typography color="text.secondary" sx={{ mt: 0.75 }}>
-                      Order webhooks are stored, item sales are counted, and products under the stock threshold are sorted by urgency.
+                      Products are pulled from Zid, low-stock items are detected live, and recent orders are used when available for sales context.
                     </Typography>
                   </Box>
                   <Divider />
@@ -381,7 +587,7 @@ function App() {
                       <Box component="table" sx={{ width: '100%', minWidth: 760, borderCollapse: 'collapse' }}>
                         <Box component="thead" sx={{ bgcolor: '#f8fafc' }}>
                           <Box component="tr">
-                            {['Product', 'SKU', 'Stock', 'Sold', 'Velocity', 'Source'].map((heading) => (
+                            {['Product', 'SKU', 'Stock', 'Sold', 'Add to stock'].map((heading) => (
                               <Box component="th" key={heading} sx={{ p: 2, textAlign: 'left', fontSize: 13, color: '#475467' }}>
                                 {heading}
                               </Box>
@@ -404,8 +610,27 @@ function App() {
                                 <Chip color="error" size="small" label={`${field(alert, ['current_stock', 'stock'], 0)} left`} sx={{ fontWeight: 800 }} />
                               </Box>
                               <Box component="td" sx={{ p: 2 }}>{field(alert, ['sold_quantity'], 0)}</Box>
-                              <Box component="td" sx={{ p: 2 }}>{field(alert, ['sales_velocity'], 0)}/day</Box>
-                              <Box component="td" sx={{ p: 2 }}>{field(alert, ['source'])}</Box>
+                              <Box component="td" sx={{ p: 2, minWidth: 220 }}>
+                                <Stack direction="row" spacing={1} alignItems="center">
+                                  <TextField
+                                    label="Qty"
+                                    type="number"
+                                    size="small"
+                                    value={stockAdditions[field(alert, ['id', 'product_id', 'sku'])] || ''}
+                                    onChange={(e) => updateStockAddition(alert, e.target.value)}
+                                    inputProps={{ min: 1, step: 1 }}
+                                    sx={{ width: 92 }}
+                                  />
+                                  <Button
+                                    variant="contained"
+                                    size="small"
+                                    onClick={() => addStockFromAlert(alert)}
+                                    disabled={updatingStockId === field(alert, ['id', 'product_id', 'sku'])}
+                                  >
+                                    {updatingStockId === field(alert, ['id', 'product_id', 'sku']) ? 'Adding...' : 'Add'}
+                                  </Button>
+                                </Stack>
+                              </Box>
                             </Box>
                           ))}
                         </Box>
@@ -416,10 +641,10 @@ function App() {
 
                 <Paper elevation={0} sx={{ mt: 3, p: { xs: 2, md: 3 }, border: '1px solid #e5e7eb', borderRadius: 2 }}>
                   <Typography variant="h6" sx={{ fontWeight: 900, mb: 2 }}>
-                    Recent Orders
+                    Recent Orders from Zid
                   </Typography>
                   {orders.length === 0 ? (
-                    <Typography color="text.secondary">No orders stored yet. Send a Zid order webhook to start filling this list.</Typography>
+                    <Typography color="text.secondary">No recent orders returned from Zid yet.</Typography>
                   ) : (
                     <Stack spacing={1.25}>
                       {orders.slice(0, 5).map((order, index) => (
@@ -427,6 +652,7 @@ function App() {
                           <Box sx={{ minWidth: 0 }}>
                             <Typography sx={{ fontWeight: 800, overflowWrap: 'anywhere' }}>Order #{field(order, ['order_id', 'id'])}</Typography>
                             <Typography variant="body2" color="text.secondary">{field(order, ['customer_name'], 'Unknown customer')}</Typography>
+                            <Chip size="small" label={field(order, ['status_name', 'status'], 'New')} sx={{ mt: 0.75, fontWeight: 700 }} />
                           </Box>
                           <Typography sx={{ fontWeight: 900, whiteSpace: 'nowrap' }}>{field(order, ['total'], 0)} SAR</Typography>
                         </Box>
@@ -440,13 +666,24 @@ function App() {
                 <Paper elevation={0} sx={{ border: '1px solid #e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
                   <Box sx={{ p: { xs: 2, md: 3 } }}>
                     <Typography variant="h5" sx={{ fontWeight: 900 }}>
-                      AI Product Marketing & Description
+                      Product Creator
                     </Typography>
                     <Typography color="text.secondary" sx={{ mt: 0.75, mb: 2 }}>
-                      Upload a product photo, pick a tone, then generate a draft with marketing copy you can edit before publishing.
+                      Create product copy with AI or enter it manually before publishing to Zid.
                     </Typography>
 
                     <Stack spacing={2}>
+                      <ToggleButtonGroup
+                        value={creatorMode}
+                        exclusive
+                        onChange={handleCreatorModeChange}
+                        fullWidth
+                        size="small"
+                        color="primary"
+                      >
+                        <ToggleButton value="ai">Create with AI</ToggleButton>
+                        <ToggleButton value="manual">Manual</ToggleButton>
+                      </ToggleButtonGroup>
                       <Button variant="outlined" component="label" fullWidth sx={{ justifyContent: 'space-between' }}>
                         {selectedImageName ? 'Change product photo' : 'Upload product photo'}
                         <input type="file" accept={IMAGE_ACCEPT} hidden onChange={handleImageSelect} />
@@ -468,6 +705,8 @@ function App() {
                         </Box>
                       )}
                       {imageInputError && <Alert severity="error">{imageInputError}</Alert>}
+                      {isAiMode && (
+                        <>
                       <TextField
                         id="product-details-input"
                         label="Product Details"
@@ -491,13 +730,15 @@ function App() {
                       <Button variant="contained" size="large" onClick={generateProduct} disabled={!selectedImage || !productDetails.trim() || generating}>
                         {generating ? 'Generating...' : 'Generate Draft'}
                       </Button>
+                        </>
+                      )}
                     </Stack>
 
                     {generatorError && <Alert severity="error" sx={{ mt: 2 }}>{generatorError}</Alert>}
                     {publishMessage && <Alert severity="success" sx={{ mt: 2 }}>{publishMessage}</Alert>}
                   </Box>
 
-                  {(generating || draftVisible) && <Divider />}
+                  {(generating || showDraftEditor) && <Divider />}
 
                   {generating && (
                     <Stack sx={{ minHeight: 180 }} alignItems="center" justifyContent="center" spacing={2}>
@@ -506,43 +747,79 @@ function App() {
                     </Stack>
                   )}
 
-                  {draftVisible && !generating && (
+                  {showDraftEditor && !generating && (
                     <Box sx={{ p: { xs: 2, md: 3 }, bgcolor: '#fbfcfe' }}>
                       <Grid container spacing={2}>
                         <Grid item xs={12}>
-                          <TextField label="Trendy_name" value={draft.trendy_name} onChange={(e) => updateDraft('trendy_name', e.target.value)} fullWidth />
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('trendy_name')}>
+                            <TextField label="Name" value={draft.trendy_name} onChange={(e) => updateDraft('trendy_name', e.target.value)} helperText={draftHelperText('trendy_name')} required fullWidth />
+                          </MaybeFieldWithReason>
                         </Grid>
                         <Grid item xs={12}>
-                          <TextField label="Trendy_name_arabic" value={draft.trendy_name_arabic} onChange={(e) => updateDraft('trendy_name_arabic', e.target.value)} fullWidth />
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('trendy_name_arabic')}>
+                            <TextField label="Trendy_name_arabic" value={draft.trendy_name_arabic} onChange={(e) => updateDraft('trendy_name_arabic', e.target.value)} helperText={draftHelperText('trendy_name_arabic')} fullWidth />
+                          </MaybeFieldWithReason>
                         </Grid>
                         <Grid item xs={12}>
-                          <TextField label="Description" value={draft.description} onChange={(e) => updateDraft('description', e.target.value)} fullWidth multiline minRows={3} />
-                        </Grid>
-                        <Grid item xs={12}>
-                          <TextField label="Description_arabic" value={draft.description_arabic} onChange={(e) => updateDraft('description_arabic', e.target.value)} fullWidth multiline minRows={3} />
-                        </Grid>
-                        <Grid item xs={12}>
-                          <TextField label="Marketing_audience" value={draft.marketing_audience} onChange={(e) => updateDraft('marketing_audience', e.target.value)} fullWidth />
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('recommended_price')}>
+                            <TextField
+                              label="Price"
+                              type="number"
+                              value={draft.recommended_price}
+                              onChange={(e) => updateDraft('recommended_price', e.target.value)}
+                              helperText={isAiMode ? 'AI suggested price. You can edit it.' : draftHelperText('recommended_price')}
+                              required
+                              fullWidth
+                              inputProps={{ min: 0, step: 0.01 }}
+                            />
+                          </MaybeFieldWithReason>
                         </Grid>
                         <Grid item xs={12}>
                           <TextField
-                            label="Marketing_partners"
-                            helperText="One partner per line"
-                            value={Array.isArray(draft.marketing_partners) ? draft.marketing_partners.join('\n') : String(draft.marketing_partners || '')}
-                            onChange={(e) => updateDraft('marketing_partners', e.target.value.split('\n').map((item) => item.trim()).filter(Boolean))}
+                            label="Stock"
+                            type="number"
+                            value={draft.stock}
+                            onChange={(e) => updateDraft('stock', e.target.value)}
+                            required
                             fullWidth
-                            multiline
-                            minRows={3}
+                            inputProps={{ min: 0, step: 1 }}
                           />
                         </Grid>
-                        <Grid item xs={12} sm={4}>
-                          <TextField label="Recommended_price" value={draft.recommended_price} onChange={(e) => updateDraft('recommended_price', e.target.value)} fullWidth />
+                        <Grid item xs={12}>
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('description')}>
+                            <TextField label="Description" value={draft.description} onChange={(e) => updateDraft('description', e.target.value)} helperText={draftHelperText('description')} required={isAiMode} fullWidth multiline minRows={3} />
+                          </MaybeFieldWithReason>
                         </Grid>
                         <Grid item xs={12}>
-                          <TextField label="Marketing_plan" value={Array.isArray(draft.marketing_plan) ? draft.marketing_plan.join('\n') : draft.marketing_plan} onChange={(e) => updateDraft('marketing_plan', e.target.value)} fullWidth multiline minRows={4} />
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('description_arabic')}>
+                            <TextField label="Description_arabic" value={draft.description_arabic} onChange={(e) => updateDraft('description_arabic', e.target.value)} helperText={draftHelperText('description_arabic')} fullWidth multiline minRows={3} />
+                          </MaybeFieldWithReason>
+                        </Grid>
+                        <Grid item xs={12}>
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('marketing_audience')}>
+                            <TextField label="Marketing_audience" value={draft.marketing_audience} onChange={(e) => updateDraft('marketing_audience', e.target.value)} helperText={draftHelperText('marketing_audience')} fullWidth />
+                          </MaybeFieldWithReason>
+                        </Grid>
+                        <Grid item xs={12}>
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('marketing_partners')}>
+                            <TextField
+                              label="Marketing_partners"
+                              helperText={draftHelperText('marketing_partners', 'One partner per line')}
+                              value={Array.isArray(draft.marketing_partners) ? draft.marketing_partners.join('\n') : String(draft.marketing_partners || '')}
+                              onChange={(e) => updateDraft('marketing_partners', e.target.value.split('\n').map((item) => item.trim()).filter(Boolean))}
+                              fullWidth
+                              multiline
+                              minRows={3}
+                            />
+                          </MaybeFieldWithReason>
+                        </Grid>
+                        <Grid item xs={12}>
+                          <MaybeFieldWithReason showReason={isAiMode} reason={draftReason('marketing_plan')}>
+                            <TextField label="Marketing_plan" value={Array.isArray(draft.marketing_plan) ? draft.marketing_plan.join('\n') : draft.marketing_plan} onChange={(e) => updateDraft('marketing_plan', e.target.value)} helperText={draftHelperText('marketing_plan')} fullWidth multiline minRows={4} />
+                          </MaybeFieldWithReason>
                         </Grid>
                       </Grid>
-                      <Button sx={{ mt: 2 }} fullWidth variant="contained" color="success" onClick={publishProduct} disabled={publishing}>
+                      <Button sx={{ mt: 2 }} fullWidth variant="contained" color="success" onClick={publishProduct} disabled={!canPublish}>
                         {publishing ? 'Publishing...' : 'Publish Product to Zid'}
                       </Button>
                     </Box>
@@ -552,6 +829,12 @@ function App() {
             </Grid>
           </Stack>
         </Container>
+        <Snackbar
+          open={Boolean(stockMessage)}
+          autoHideDuration={3500}
+          onClose={() => setStockMessage('')}
+          message={stockMessage}
+        />
       </Box>
     </ThemeProvider>
   )

@@ -1,28 +1,22 @@
 # Merchant Automation Dashboard - Sandbox
 
-A full-stack application for automating merchant orders from Zid e-commerce platform.
+A full-stack dashboard for reading live merchant data from the Zid e-commerce API.
 
-## 📁 Project Structure
+## Project Structure
 
-```
-├── frontend/          # React + Vite application
-│   ├── src/
-│   │   ├── App.jsx    # Main component
-│   │   └── main.jsx   # Entry point
-│   ├── index.html
-│   ├── package.json
-│   └── vite.config.js
-├── backend/           # FastAPI backend
-│   ├── main.py        # FastAPI application
-│   └── requirements.txt
-└── README.md
+```text
+frontend/          React + Vite application
+backend/           FastAPI backend
+README.md
 ```
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
-- Node.js 16+ (for frontend)
-- Python 3.8+ (for backend)
+
+- Node.js 16+ for the frontend
+- Python 3.8+ for the backend
+- Zid store credentials
 
 ### Frontend Setup
 
@@ -32,54 +26,68 @@ npm install
 npm run dev
 ```
 
-The frontend will be available at `http://localhost:5173`
+The frontend will be available at `http://localhost:5173`.
 
 ### Backend Setup
 
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate  # On Windows
+venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-The backend API will be available at `http://localhost:8000`
+The backend API will be available at `http://localhost:8000`.
 
-### Firestore Setup
+### Zid API Setup
 
-The backend now stores orders in Firestore instead of SQLite.
-
-Set one of these in `backend/.env`:
+Set these values in `backend/.env`:
 
 ```bash
-GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
+STORE_ID=your_store_id_here
+ACCESS_TOKEN=your_store_access_token_here
 ```
 
-or
+Optional OAuth values:
 
 ```bash
-FIREBASE_SERVICE_ACCOUNT_FILE=C:\path\to\service-account.json
-FIRESTORE_COLLECTION=orders
+ZID_CLIENT_ID=your_client_id_here
+ZID_CLIENT_SECRET=your_client_secret_here
+ZID_REDIRECT_URI=http://localhost:8000/auth/redirect
 ```
 
-If you run in Google Cloud with Application Default Credentials, the service account file is optional.
-
-## 📌 API Endpoints
-
-### POST /api/webhook/order
-Receives order webhooks from Zid platform
-- Payload structure: Must include order data with id, customer name, and total
+## API Endpoints
 
 ### GET /api/orders
-Returns all orders stored in the database
-- Response: Array of order objects
 
-## 🛠️ Features
+Returns recent orders directly from Zid.
 
-- ✅ Real-time order automation dashboard
-- ✅ WebSocket-ready polling (5-second intervals)
-- ✅ SQLite database for order storage
-- ✅ Firestore database for order storage
-- ✅ CORS enabled for cross-origin requests
-- ✅ RTL (Right-to-Left) support for Arabic text
+### GET /api/alerts
+
+Returns low-stock alerts calculated from live Zid products.
+
+### GET /api/zid/orders
+
+Returns the raw Zid orders response.
+
+### GET /api/zid/products
+
+Returns the raw Zid products response.
+
+### POST /api/products/ai-create
+
+Generates an editable product draft from an image URL.
+
+### POST /api/products/publish
+
+Publishes the reviewed product draft to Zid.
+
+## Features
+
+- Live recent orders from Zid API
+- Live low-stock alerts from Zid products
+- AI product draft generation
+- Product publishing to Zid
+- CORS enabled for local frontend development
+- RTL-ready UI components
