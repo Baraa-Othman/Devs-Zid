@@ -31,11 +31,11 @@ ZID_AUTH_URL      = "https://oauth.zid.sa/oauth/authorize"
 ZID_TOKEN_URL     = "https://oauth.zid.sa/oauth/token"
 ZID_API_BASE      = "https://api.zid.sa/v1"
 
-# In-memory token store (replace with DB for production)
+# In-memory token store — pre-loaded from .env OAuth tokens
 token_store: dict = {
     "access_token": ACCESS_TOKEN,
-    "refresh_token": None,
-    "authorization": None,   # Zid's "Authorization" field from token response
+    "refresh_token": os.getenv("REFRESH_TOKEN"),
+    "authorization": os.getenv("AUTHORIZATION"),  # JWT from OAuth response
 }
 
 # ─── Database ─────────────────────────────────────────────────────────────────
