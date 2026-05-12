@@ -216,6 +216,16 @@ def localized_text(value, default="-"):
     return first_value(value, default=default)
 
 
+def localized_pair(value, default=""):
+    if isinstance(value, dict):
+        ar = first_value(value.get("ar"), value.get("en"), *value.values(), default=default)
+        en = first_value(value.get("en"), value.get("ar"), *value.values(), default=default)
+        return {"ar": ar, "en": en}
+
+    text = first_value(value, default=default)
+    return {"ar": text, "en": text}
+
+
 def get_order_data(payload):
     if not isinstance(payload, dict):
         return {}
@@ -370,6 +380,8 @@ def normalize_product(product):
 
     data = product.get("data") if isinstance(product.get("data"), dict) else product
     product_id = first_value(data.get("id"), data.get("uuid"), data.get("product_id"))
+    names = localized_pair(first_value(data.get("name"), data.get("title"), default="Unknown product"))
+    descriptions = localized_pair(first_value(data.get("description"), data.get("short_description"), default=""))
     name = localized_text(first_value(data.get("name"), data.get("title"), default="Unknown product"))
     stock = extract_stock_from_product(data)
 
@@ -378,6 +390,12 @@ def normalize_product(product):
         "product_id": str(product_id) if product_id is not None else None,
         "product_name": name,
         "name": name,
+        "name_ar": names.get("ar"),
+        "name_en": names.get("en"),
+        "description": descriptions.get("en"),
+        "description_arabic": descriptions.get("ar"),
+        "description_ar": descriptions.get("ar"),
+        "description_en": descriptions.get("en"),
         "sku": first_value(data.get("sku"), data.get("SKU")),
         "price": to_float(first_value(data.get("price"), data.get("sale_price"))),
         "current_stock": stock,
@@ -757,18 +775,15 @@ def product_payload_for_zid(draft):
 
 
 def validate_publish_draft(draft):
-    name = first_value(
-        draft.get("trendy_name_arabic"),
-        draft.get("trendy_name"),
-        draft.get("name_ar"),
-        draft.get("name_en"),
-        draft.get("name"),
-    )
+    name = first_value(draft.get("trendy_name"), draft.get("name_en"), draft.get("name"))
+    arabic_name = first_value(draft.get("trendy_name_arabic"), draft.get("name_ar"))
     price = first_value(draft.get("recommended_price"), draft.get("price"), draft.get("suggested_price"))
     stock = first_value(draft.get("stock"), draft.get("quantity"), draft.get("available_quantity"))
 
     if not str(name or "").strip():
         raise HTTPException(status_code=400, detail="Product name is required")
+    if not str(arabic_name or "").strip():
+        raise HTTPException(status_code=400, detail="Arabic product name is required")
     if price in (None, ""):
         raise HTTPException(status_code=400, detail="Product price is required")
     if to_float(price, None) is None or to_float(price) < 0:
@@ -799,6 +814,49 @@ async def update_zid_product_stock(product_id, new_stock):
             last_error = exc
 
     raise last_error or HTTPException(status_code=502, detail="Could not update product stock in Zid")
+
+
+def product_update_payload_for_zid(body):
+    name_en = first_value(body.get("name_en"), body.get("name"), body.get("product_name"))
+    name_ar = first_value(body.get("name_ar"), body.get("name_arabic"), body.get("trendy_name_arabic"), name_en)
+    description_en = first_value(body.get("description"), body.get("description_en"))
+    description_ar = first_value(body.get("description_arabic"), body.get("description_ar"), description_en)
+    price = first_value(body.get("price"), body.get("recommended_price"))
+    stock = first_value(body.get("stock"), body.get("quantity"), body.get("current_stock"))
+
+    payload = {}
+
+    if name_en not in (None, "") or name_ar not in (None, ""):
+        if not str(first_value(name_en, name_ar, default="")).strip():
+            raise HTTPException(status_code=400, detail="Product name is required")
+        payload["name"] = {
+            "ar": str(first_value(name_ar, name_en, default="")).strip(),
+            "en": str(first_value(name_en, name_ar, default="")).strip(),
+        }
+
+    if description_en is not None or description_ar is not None:
+        payload["description"] = {
+            "ar": str(first_value(description_ar, description_en, default="")),
+            "en": str(first_value(description_en, description_ar, default="")),
+        }
+
+    if price not in (None, ""):
+        parsed_price = to_float(price, None)
+        if parsed_price is None or parsed_price < 0:
+            raise HTTPException(status_code=400, detail="Product price must be 0 or greater")
+        payload["price"] = parsed_price
+
+    if stock not in (None, ""):
+        parsed_stock = to_int(stock, None)
+        if parsed_stock is None or parsed_stock < 0:
+            raise HTTPException(status_code=400, detail="Product stock must be 0 or greater")
+        payload["quantity"] = parsed_stock
+        payload["is_infinite"] = False
+
+    if not payload:
+        raise HTTPException(status_code=400, detail="No product changes provided")
+
+    return payload
 
 
 @app.get("/")
@@ -1108,6 +1166,37 @@ async def delete_product(product_id: str):
         "status": "success",
         "message": "Product deleted from Zid",
         "product_id": product_id,
+    }
+
+
+@app.patch("/api/products/{product_id}")
+async def update_product(product_id: str, request: Request):
+    if not zid_ready():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Zid ACCESS_TOKEN/ZID_ACCESS_TOKEN or ZID_STORE_ID/STORE_ID",
+        )
+
+    body = await request.json()
+    payload = product_update_payload_for_zid(body)
+    update_response = await zid_request(
+        f"/products/{product_id}/",
+        method="PATCH",
+        json_body=payload,
+    )
+
+    try:
+        verified_product = await zid_request(f"/products/{product_id}/")
+    except HTTPException:
+        verified_product = update_response
+
+    return {
+        "status": "success",
+        "message": "Product updated in Zid",
+        "product_id": product_id,
+        "zid_payload": payload,
+        "zid_response": update_response,
+        "product": normalize_product(verified_product),
     }
 
 
