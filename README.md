@@ -46,6 +46,25 @@ uvicorn main:app --reload
 
 The backend API will be available at `http://localhost:8000`
 
+### Firestore Setup
+
+The backend now stores orders in Firestore instead of SQLite.
+
+Set one of these in `backend/.env`:
+
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
+```
+
+or
+
+```bash
+FIREBASE_SERVICE_ACCOUNT_FILE=C:\path\to\service-account.json
+FIRESTORE_COLLECTION=orders
+```
+
+If you run in Google Cloud with Application Default Credentials, the service account file is optional.
+
 ## 📌 API Endpoints
 
 ### POST /api/webhook/order
@@ -61,5 +80,6 @@ Returns all orders stored in the database
 - ✅ Real-time order automation dashboard
 - ✅ WebSocket-ready polling (5-second intervals)
 - ✅ SQLite database for order storage
+- ✅ Firestore database for order storage
 - ✅ CORS enabled for cross-origin requests
 - ✅ RTL (Right-to-Left) support for Arabic text
