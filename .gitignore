@@ -28,3 +28,4 @@ backend/firebase-service-account.json
 .DS_Store
 Thumbs.db
 ngrok.yml
+.node_modules/

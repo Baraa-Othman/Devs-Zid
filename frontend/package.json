@@ -9,13 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/lab": "^5.0.0-alpha.150",
+    "@mui/material": "^5.18.0",
+    "@zidsa/zidmui": "^3.1.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "@zidsa/zidmui": "latest",
-    "@mui/material": "^5.15.0",
-    "@mui/lab": "^5.0.0-alpha.150",
-    "@emotion/react": "^11.11.0",
-    "@emotion/styled": "^11.11.0",
     "use-debounce": "^10.0.0"
   },
   "devDependencies": {

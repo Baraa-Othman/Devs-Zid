@@ -31,16 +31,65 @@ const tones = [
   { value: 'energetic', label: 'Energetic' },
 ]
 
-const emptyDraft = {
-  name_ar: '',
-  name_en: '',
-  description_ar: '',
-  description_en: '',
-  seo_title_ar: '',
-  seo_title_en: '',
-  price: '',
-  tags: '',
-  bullets: '',
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024
+const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,image/jpg'
+
+const draftPlaceholders = {
+  trendy_name: 'Trendy product name',
+  trendy_name_arabic: 'اسم منتج جذاب',
+  description: 'A short marketing description will appear here.',
+  description_arabic: 'سيظهر الوصف التسويقي العربي هنا.',
+  marketing_audience: 'Primary audience placeholder',
+  marketing_partners: ['Partner placeholder 1', 'Partner placeholder 2'],
+  recommended_price: '0',
+  marketing_plan: 'Marketing plan placeholder',
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('Could not read the selected image.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function normalizeDraft(payload) {
+  const source = payload?.data || payload?.product || payload || {}
+  const trendName = source.trendy_name || source.name_en || source.name || draftPlaceholders.trendy_name
+  const trendNameArabic = source.trendy_name_arabic || source.name_ar || source.name || draftPlaceholders.trendy_name_arabic
+  const description = source.description || source.description_en || draftPlaceholders.description
+  const descriptionArabic = source.description_arabic || source.description_ar || draftPlaceholders.description_arabic
+  const marketingPartners = Array.isArray(source.marketing_partners)
+    ? source.marketing_partners
+    : Array.isArray(source.partners)
+      ? source.partners
+      : Array.isArray(source.tags)
+        ? source.tags
+        : draftPlaceholders.marketing_partners
+  const recommendedPrice = source.recommended_price || source.price || draftPlaceholders.recommended_price
+  const marketingPlan = source.marketing_plan || source.bullets || draftPlaceholders.marketing_plan
+  const marketingAudience = source.marketing_audience || source.audience || draftPlaceholders.marketing_audience
+
+  return {
+    trendy_name: trendName,
+    trendy_name_arabic: trendNameArabic,
+    description,
+    description_arabic: descriptionArabic,
+    marketing_audience: marketingAudience,
+    marketing_partners: marketingPartners,
+    recommended_price: recommendedPrice,
+    marketing_plan: marketingPlan,
+    name_ar: trendNameArabic,
+    name_en: trendName,
+    description_ar: descriptionArabic,
+    description_en: description,
+    seo_title_ar: source.seo_title_ar || trendNameArabic,
+    seo_title_en: source.seo_title_en || trendName,
+    price: recommendedPrice,
+    tags: marketingPartners.join(', '),
+    bullets: Array.isArray(marketingPlan) ? marketingPlan.join('\n') : String(marketingPlan || ''),
+  }
 }
 
 async function fetchJson(path, options) {
@@ -60,24 +109,6 @@ function asArray(payload, key) {
   if (Array.isArray(payload?.[key])) return payload[key]
   if (Array.isArray(payload?.data)) return payload.data
   return []
-}
-
-function normalizeDraft(payload) {
-  const source = payload?.data || payload?.product || payload || {}
-  const bullets = Array.isArray(source.bullets) ? source.bullets.join('\n') : String(source.bullets || '')
-  const tags = Array.isArray(source.tags) ? source.tags.join(', ') : String(source.tags || '')
-
-  return {
-    name_ar: source.name_ar || source.name || '',
-    name_en: source.name_en || '',
-    description_ar: source.description_ar || source.description || '',
-    description_en: source.description_en || '',
-    seo_title_ar: source.seo_title_ar || source.seo_title || '',
-    seo_title_en: source.seo_title_en || '',
-    price: source.price || '',
-    tags,
-    bullets,
-  }
 }
 
 function field(item, keys, fallback = '-') {
@@ -115,14 +146,18 @@ function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [loadError, setLoadError] = useState('')
 
-  const [imageUrl, setImageUrl] = useState('')
+  const [selectedImage, setSelectedImage] = useState(null)
+  const [selectedImageName, setSelectedImageName] = useState('')
+  const [selectedImagePreview, setSelectedImagePreview] = useState('')
+  const [imageInputError, setImageInputError] = useState('')
   const [tone, setTone] = useState('professional')
   const [generating, setGenerating] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [generatorError, setGeneratorError] = useState('')
   const [publishMessage, setPublishMessage] = useState('')
   const [generatedRaw, setGeneratedRaw] = useState(null)
-  const [draft, setDraft] = useState(emptyDraft)
+  const [draftVisible, setDraftVisible] = useState(false)
+  const [draft, setDraft] = useState({ ...draftPlaceholders })
 
   const totalSold = useMemo(
     () => alerts.reduce((sum, item) => sum + Number(field(item, ['sold_quantity'], 0)), 0),
@@ -167,24 +202,72 @@ function App() {
     return () => window.clearInterval(id)
   }, [])
 
-  async function generateProduct() {
+  async function handleImageSelect(event) {
+    const file = event.target.files?.[0]
+    setImageInputError('')
     setGeneratorError('')
     setPublishMessage('')
     setGeneratedRaw(null)
+    setDraftVisible(false)
+
+    if (!file) {
+      setSelectedImage(null)
+      setSelectedImageName('')
+      setSelectedImagePreview('')
+      return
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setImageInputError('Please choose a JPEG, PNG, WebP, or GIF image.')
+      event.target.value = ''
+      return
+    }
+
+    if (file.size > MAX_IMAGE_BYTES) {
+      setImageInputError('Image size must be 20 MB or smaller.')
+      event.target.value = ''
+      return
+    }
+
+    try {
+      const preview = await readFileAsDataUrl(file)
+      setSelectedImage(file)
+      setSelectedImageName(file.name)
+      setSelectedImagePreview(preview)
+    } catch (error) {
+      setSelectedImage(null)
+      setSelectedImageName('')
+      setSelectedImagePreview('')
+      setImageInputError(error.message || 'Could not read the selected image.')
+      event.target.value = ''
+    }
+  }
+
+  async function generateProduct() {
+    setGeneratorError('')
+    setPublishMessage('')
+    setImageInputError('')
+    setGeneratedRaw(null)
+    setDraftVisible(true)
+    setDraft({ ...draftPlaceholders })
     setGenerating(true)
 
     try {
+      const image_url = selectedImagePreview || ''
       const payload = await fetchJson('/api/products/ai-create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_url: imageUrl, tone }),
+        body: JSON.stringify({ image_url, tone }),
       })
+      const normalized = normalizeDraft(payload)
       setGeneratedRaw(payload?.data || payload)
-      setDraft(normalizeDraft(payload))
+      setDraft(normalized)
     } catch (error) {
       setGeneratorError(error.message || 'Could not generate product draft.')
+      setDraft({ ...draftPlaceholders })
     } finally {
       setGenerating(false)
+      setDraftVisible(true)
     }
   }
 
@@ -200,10 +283,23 @@ function App() {
         body: JSON.stringify({
           ...generatedRaw,
           ...draft,
-          image_url: imageUrl,
+          image_url: selectedImagePreview,
           tone,
-          tags: draft.tags.split(',').map((item) => item.trim()).filter(Boolean),
-          bullets: draft.bullets.split('\n').map((item) => item.trim()).filter(Boolean),
+          name: draft.trendy_name_arabic,
+          name_ar: draft.trendy_name_arabic,
+          name_en: draft.trendy_name,
+          description: draft.description_arabic,
+          description_ar: draft.description_arabic,
+          description_en: draft.description,
+          price: draft.recommended_price,
+          suggested_price: draft.recommended_price,
+          tags: draft.marketing_partners,
+          bullets: Array.isArray(draft.marketing_plan)
+            ? draft.marketing_plan
+            : String(draft.marketing_plan || '')
+                .split('\n')
+                .map((item) => item.trim())
+                .filter(Boolean),
         }),
       })
       setPublishMessage('Product published to Zid.')
@@ -343,20 +439,34 @@ function App() {
                 <Paper elevation={0} sx={{ border: '1px solid #e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
                   <Box sx={{ p: { xs: 2, md: 3 } }}>
                     <Typography variant="h5" sx={{ fontWeight: 900 }}>
-                      AI Product Description Generator
+                      AI Product Marketing & Description
                     </Typography>
                     <Typography color="text.secondary" sx={{ mt: 0.75, mb: 2 }}>
-                      Paste a product image URL, pick a tone, edit the bilingual draft, then publish to Zid.
+                      Upload a product photo, pick a tone, then generate a draft with marketing copy you can edit before publishing.
                     </Typography>
 
                     <Stack spacing={2}>
-                      <TextField
-                        label="Product image URL"
-                        value={imageUrl}
-                        onChange={(event) => setImageUrl(event.target.value)}
-                        placeholder="https://example.com/product.jpg"
-                        fullWidth
-                      />
+                      <Button variant="outlined" component="label" fullWidth sx={{ justifyContent: 'space-between' }}>
+                        {selectedImageName ? 'Change product photo' : 'Upload product photo'}
+                        <input type="file" accept={IMAGE_ACCEPT} hidden onChange={handleImageSelect} />
+                      </Button>
+                      <Typography variant="body2" color="text.secondary">
+                        JPEG, PNG, WebP, or GIF up to 20 MB.
+                      </Typography>
+                      {selectedImagePreview && (
+                        <Box sx={{ p: 1.25, border: '1px solid #e5e7eb', borderRadius: 2, bgcolor: '#f8fafc' }}>
+                          <Box
+                            component="img"
+                            src={selectedImagePreview}
+                            alt={selectedImageName || 'Selected product'}
+                            sx={{ width: '100%', maxHeight: 240, objectFit: 'contain', borderRadius: 1.5, bgcolor: '#fff' }}
+                          />
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                            {selectedImageName}
+                          </Typography>
+                        </Box>
+                      )}
+                      {imageInputError && <Alert severity="error">{imageInputError}</Alert>}
                       <FormControl fullWidth>
                         <InputLabel id="tone-label">Tone</InputLabel>
                         <Select labelId="tone-label" label="Tone" value={tone} onChange={(event) => setTone(event.target.value)}>
@@ -365,7 +475,7 @@ function App() {
                           ))}
                         </Select>
                       </FormControl>
-                      <Button variant="contained" size="large" onClick={generateProduct} disabled={!imageUrl || generating}>
+                      <Button variant="contained" size="large" onClick={generateProduct} disabled={!selectedImage || generating}>
                         {generating ? 'Generating...' : 'Generate Draft'}
                       </Button>
                     </Stack>
@@ -374,7 +484,7 @@ function App() {
                     {publishMessage && <Alert severity="success" sx={{ mt: 2 }}>{publishMessage}</Alert>}
                   </Box>
 
-                  {(generating || generatedRaw) && <Divider />}
+                  {(generating || draftVisible) && <Divider />}
 
                   {generating && (
                     <Stack sx={{ minHeight: 180 }} alignItems="center" justifyContent="center" spacing={2}>
@@ -383,35 +493,40 @@ function App() {
                     </Stack>
                   )}
 
-                  {generatedRaw && !generating && (
+                  {draftVisible && !generating && (
                     <Box sx={{ p: { xs: 2, md: 3 }, bgcolor: '#fbfcfe' }}>
                       <Grid container spacing={2}>
-                        <Grid item xs={12} sm={6}>
-                          <TextField label="Arabic name" value={draft.name_ar} onChange={(e) => updateDraft('name_ar', e.target.value)} fullWidth />
-                        </Grid>
-                        <Grid item xs={12} sm={6}>
-                          <TextField label="English name" value={draft.name_en} onChange={(e) => updateDraft('name_en', e.target.value)} fullWidth />
+                        <Grid item xs={12}>
+                          <TextField label="Trendy_name" value={draft.trendy_name} onChange={(e) => updateDraft('trendy_name', e.target.value)} fullWidth />
                         </Grid>
                         <Grid item xs={12}>
-                          <TextField label="Arabic description" value={draft.description_ar} onChange={(e) => updateDraft('description_ar', e.target.value)} fullWidth multiline minRows={3} />
+                          <TextField label="Trendy_name_arabic" value={draft.trendy_name_arabic} onChange={(e) => updateDraft('trendy_name_arabic', e.target.value)} fullWidth />
                         </Grid>
                         <Grid item xs={12}>
-                          <TextField label="English description" value={draft.description_en} onChange={(e) => updateDraft('description_en', e.target.value)} fullWidth multiline minRows={3} />
+                          <TextField label="Description" value={draft.description} onChange={(e) => updateDraft('description', e.target.value)} fullWidth multiline minRows={3} />
                         </Grid>
-                        <Grid item xs={12} sm={6}>
-                          <TextField label="Arabic SEO title" value={draft.seo_title_ar} onChange={(e) => updateDraft('seo_title_ar', e.target.value)} fullWidth />
+                        <Grid item xs={12}>
+                          <TextField label="Description_arabic" value={draft.description_arabic} onChange={(e) => updateDraft('description_arabic', e.target.value)} fullWidth multiline minRows={3} />
                         </Grid>
-                        <Grid item xs={12} sm={6}>
-                          <TextField label="English SEO title" value={draft.seo_title_en} onChange={(e) => updateDraft('seo_title_en', e.target.value)} fullWidth />
+                        <Grid item xs={12}>
+                          <TextField label="Marketing_audience" value={draft.marketing_audience} onChange={(e) => updateDraft('marketing_audience', e.target.value)} fullWidth />
+                        </Grid>
+                        <Grid item xs={12}>
+                          <TextField
+                            label="Marketing_partners"
+                            helperText="One partner per line"
+                            value={Array.isArray(draft.marketing_partners) ? draft.marketing_partners.join('\n') : String(draft.marketing_partners || '')}
+                            onChange={(e) => updateDraft('marketing_partners', e.target.value.split('\n').map((item) => item.trim()).filter(Boolean))}
+                            fullWidth
+                            multiline
+                            minRows={3}
+                          />
                         </Grid>
                         <Grid item xs={12} sm={4}>
-                          <TextField label="Price" value={draft.price} onChange={(e) => updateDraft('price', e.target.value)} fullWidth />
-                        </Grid>
-                        <Grid item xs={12} sm={8}>
-                          <TextField label="Tags" helperText="Comma separated" value={draft.tags} onChange={(e) => updateDraft('tags', e.target.value)} fullWidth />
+                          <TextField label="Recommended_price" value={draft.recommended_price} onChange={(e) => updateDraft('recommended_price', e.target.value)} fullWidth />
                         </Grid>
                         <Grid item xs={12}>
-                          <TextField label="Bullet points" helperText="One point per line" value={draft.bullets} onChange={(e) => updateDraft('bullets', e.target.value)} fullWidth multiline minRows={3} />
+                          <TextField label="Marketing_plan" value={Array.isArray(draft.marketing_plan) ? draft.marketing_plan.join('\n') : draft.marketing_plan} onChange={(e) => updateDraft('marketing_plan', e.target.value)} fullWidth multiline minRows={4} />
                         </Grid>
                       </Grid>
                       <Button sx={{ mt: 2 }} fullWidth variant="contained" color="success" onClick={publishProduct} disabled={publishing}>
