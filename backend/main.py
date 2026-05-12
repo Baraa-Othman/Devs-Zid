@@ -490,12 +490,29 @@ async def fetch_zid_products(limit=100):
 
 
 async def fetch_zid_coupons(limit=100):
-    payload = await zid_request(
-        "/managers/store/coupons",
-        params={"page_size": limit},
-    )
-    raw_coupons = payload_list(payload, "coupons", "data", "payload", "results")
-    return [coupon for coupon in (normalize_coupon(item) for item in raw_coupons[:limit]) if coupon]
+    coupons = []
+    page = 1
+    page_size = min(limit, 100)
+
+    while len(coupons) < limit:
+        payload = await zid_request(
+            "/managers/store/coupons",
+            params={"page": page, "page_size": page_size},
+        )
+        raw_coupons = payload_list(payload, "coupons", "data", "payload", "results")
+        coupons.extend(
+            coupon
+            for coupon in (normalize_coupon(item) for item in raw_coupons)
+            if coupon
+        )
+
+        pagination = payload.get("pagination") if isinstance(payload, dict) else {}
+        next_page = pagination.get("next_page") if isinstance(pagination, dict) else None
+        if not raw_coupons or not next_page or next_page == page:
+            break
+        page = to_int(next_page, page + 1)
+
+    return coupons[:limit]
 
 
 def sales_velocity_for(orders, product_id, sku):
@@ -974,7 +991,7 @@ def coupon_payload_for_zid(body):
         "is_shown_in_pos": "1" if bool(body.get("is_shown_in_pos")) else "",
         "is_mobile_app_active": "1" if bool(body.get("is_mobile_app_active")) else "",
         "conditions": first_value(body.get("conditions"), default=""),
-        "conditions_criteria": first_value(body.get("conditions_criteria"), default=""),
+        "conditions_criteria": first_value(body.get("conditions_criteria"), default="all"),
     }
 
     return payload
