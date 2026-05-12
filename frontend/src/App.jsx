@@ -151,6 +151,7 @@ function App() {
   const [selectedImagePreview, setSelectedImagePreview] = useState('')
   const [imageInputError, setImageInputError] = useState('')
   const [tone, setTone] = useState('professional')
+  const [productDetails, setProductDetails] = useState('')
   const [generating, setGenerating] = useState(false)
   const [publishing, setPublishing] = useState(false)
   const [generatorError, setGeneratorError] = useState('')
@@ -257,7 +258,7 @@ function App() {
       const payload = await fetchJson('/api/products/ai-create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_url, tone }),
+        body: JSON.stringify({ image_url, tone, product_details: productDetails.trim() || undefined }),
       })
       const normalized = normalizeDraft(payload)
       setGeneratedRaw(payload?.data || payload)
@@ -331,7 +332,7 @@ function App() {
                   </Typography>
                 </Box>
                 <Stack direction="row" spacing={1.25} flexWrap="wrap" useFlexGap>
-                  <Chip label={storage?.mode ? `Storage: ${storage.mode}` : 'Storage: checking'} color={storage?.mode === 'firestore' ? 'success' : 'default'} />
+
                   <Button variant="contained" onClick={() => loadDashboard({ quiet: true })} disabled={refreshing}>
                     {refreshing ? 'Refreshing...' : 'Refresh'}
                   </Button>
@@ -467,6 +468,18 @@ function App() {
                         </Box>
                       )}
                       {imageInputError && <Alert severity="error">{imageInputError}</Alert>}
+                      <TextField
+                        id="product-details-input"
+                        label="Product Details"
+                        placeholder="Describe your product: materials, use-cases, target market, key features… The AI will use this to write better copy."
+                        value={productDetails}
+                        onChange={(e) => setProductDetails(e.target.value)}
+                        fullWidth
+                        multiline
+                        minRows={3}
+                        required
+                        helperText="Required — this context helps the AI generate accurate marketing copy."
+                      />
                       <FormControl fullWidth>
                         <InputLabel id="tone-label">Tone</InputLabel>
                         <Select labelId="tone-label" label="Tone" value={tone} onChange={(event) => setTone(event.target.value)}>
@@ -475,7 +488,7 @@ function App() {
                           ))}
                         </Select>
                       </FormControl>
-                      <Button variant="contained" size="large" onClick={generateProduct} disabled={!selectedImage || generating}>
+                      <Button variant="contained" size="large" onClick={generateProduct} disabled={!selectedImage || !productDetails.trim() || generating}>
                         {generating ? 'Generating...' : 'Generate Draft'}
                       </Button>
                     </Stack>
