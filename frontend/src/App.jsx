@@ -604,7 +604,7 @@ function App() {
 
   useEffect(() => {
     loadDashboard()
-    const id = window.setInterval(() => loadDashboard({ quiet: true }), 15000)
+    const id = window.setInterval(() => loadDashboard({ quiet: true }), 60000)
     return () => window.clearInterval(id)
   }, [])
 
