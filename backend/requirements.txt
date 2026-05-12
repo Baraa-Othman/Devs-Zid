@@ -4,3 +4,4 @@ python-multipart==0.0.6
 zid-client
 python-dotenv
 google-generativeai
+firebase-admin
