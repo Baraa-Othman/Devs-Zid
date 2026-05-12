@@ -185,6 +185,8 @@ async def zid_request(path, params=None, method="GET", json_body=None):
         raise HTTPException(status_code=429, detail="Zid API: Rate limit hit. Try again shortly.")
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
+    if response.status_code == 204 or not response.content:
+        return {}
 
     return response.json()
 
@@ -963,6 +965,15 @@ async def get_alerts():
     }
 
 
+@app.get("/api/products")
+async def get_products():
+    products = await fetch_zid_products(limit=100)
+    return {
+        "status": "success",
+        "products": products,
+    }
+
+
 @app.post("/api/alerts/recalculate")
 async def recalculate_alerts():
     alerts = await build_low_stock_alerts()
@@ -1077,6 +1088,26 @@ async def add_product_stock(product_id: str, request: Request):
         "added_stock": amount,
         "new_stock": new_stock,
         "zid_response": update_response,
+    }
+
+
+@app.delete("/api/products/{product_id}")
+async def delete_product(product_id: str):
+    if not zid_ready():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Zid ACCESS_TOKEN/ZID_ACCESS_TOKEN or ZID_STORE_ID/STORE_ID",
+        )
+
+    await zid_request(
+        f"/products/{product_id}/",
+        method="DELETE",
+    )
+
+    return {
+        "status": "success",
+        "message": "Product deleted from Zid",
+        "product_id": product_id,
     }
 
 

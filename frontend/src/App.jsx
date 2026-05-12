@@ -211,6 +211,10 @@ function field(item, keys, fallback = '-') {
   return fallback
 }
 
+function stockLabel(item) {
+  return item?.is_infinite ? 'Infinity' : field(item, ['current_stock', 'stock'], 0)
+}
+
 function Stat({ label, value, tone = 'default' }) {
   const colors = {
     default: ['#f8fafc', '#334155'],
@@ -254,7 +258,7 @@ function MaybeFieldWithReason({ showReason, reason, children }) {
 function App() {
   const [orders, setOrders] = useState([])
   const [alerts, setAlerts] = useState([])
-  const [dataSource, setDataSource] = useState(null)
+  const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -273,6 +277,7 @@ function App() {
   const [stockMessage, setStockMessage] = useState('')
   const [stockAdditions, setStockAdditions] = useState({})
   const [updatingStockId, setUpdatingStockId] = useState('')
+  const [deletingProductId, setDeletingProductId] = useState('')
   const [generatedRaw, setGeneratedRaw] = useState(null)
   const [fieldExplanations, setFieldExplanations] = useState({})
   const [draftVisible, setDraftVisible] = useState(false)
@@ -288,10 +293,10 @@ function App() {
     quiet ? setRefreshing(true) : setLoading(true)
 
     try {
-      const [ordersResult, alertsResult, sourceResult] = await Promise.allSettled([
+      const [ordersResult, alertsResult, productsResult] = await Promise.allSettled([
         fetchJson('/api/orders'),
         fetchJson('/api/alerts'),
-        fetchJson('/api/source/status'),
+        fetchJson('/api/products'),
       ])
 
       if (ordersResult.status === 'fulfilled') {
@@ -300,8 +305,8 @@ function App() {
       if (alertsResult.status === 'fulfilled') {
         setAlerts(asArray(alertsResult.value, 'alerts'))
       }
-      if (sourceResult.status === 'fulfilled') {
-        setDataSource(sourceResult.value?.data || sourceResult.value)
+      if (productsResult.status === 'fulfilled') {
+        setProducts(asArray(productsResult.value, 'products'))
       }
 
       if (ordersResult.status === 'rejected' && alertsResult.status === 'rejected') {
@@ -521,6 +526,33 @@ function App() {
     }
   }
 
+  async function deleteProduct(product) {
+    const productId = field(product, ['product_id', 'id'], '')
+    const productName = field(product, ['product_name', 'name', 'title'], 'this product')
+
+    if (!productId) {
+      setStockMessage('Could not find product ID.')
+      return
+    }
+    if (!window.confirm(`Delete ${productName} from Zid?`)) return
+
+    setDeletingProductId(productId)
+    setStockMessage('')
+
+    try {
+      const payload = await fetchJson(`/api/products/${encodeURIComponent(productId)}`, {
+        method: 'DELETE',
+      })
+      setProducts((current) => current.filter((item) => field(item, ['product_id', 'id'], '') !== productId))
+      setAlerts((current) => current.filter((item) => field(item, ['product_id', 'id'], '') !== productId))
+      setStockMessage(payload?.message || 'Product deleted.')
+    } catch (error) {
+      setStockMessage(error.message || 'Could not delete product.')
+    } finally {
+      setDeletingProductId('')
+    }
+  }
+
   return (
     <ThemeProvider theme={themeParcel}>
       <CssBaseline />
@@ -538,7 +570,6 @@ function App() {
                   </Typography>
                 </Box>
                 <Stack direction="row" spacing={1.25} flexWrap="wrap" useFlexGap>
-                  <Chip label={dataSource?.source === 'zid_api' ? 'Source: Zid API' : 'Source: checking'} color={dataSource?.connected ? 'success' : 'default'} />
                   <Button variant="contained" onClick={() => loadDashboard({ quiet: true })} disabled={refreshing}>
                     {refreshing ? 'Refreshing...' : 'Refresh'}
                   </Button>
@@ -658,6 +689,73 @@ function App() {
                         </Box>
                       ))}
                     </Stack>
+                  )}
+                </Paper>
+
+                <Paper elevation={0} sx={{ mt: 3, border: '1px solid #e5e7eb', borderRadius: 2, overflow: 'hidden' }}>
+                  <Box sx={{ p: { xs: 2, md: 3 } }}>
+                    <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                      Products
+                    </Typography>
+                    <Typography color="text.secondary" sx={{ mt: 0.75 }}>
+                      Products currently available in Zid. Delete removes the product from Zid and this list.
+                    </Typography>
+                  </Box>
+                  <Divider />
+                  {loading ? (
+                    <Stack sx={{ minHeight: 180 }} alignItems="center" justifyContent="center" spacing={2}>
+                      <CircularProgress size={28} />
+                      <Typography color="text.secondary">Loading products...</Typography>
+                    </Stack>
+                  ) : products.length === 0 ? (
+                    <Box sx={{ p: 3 }}>
+                      <Alert severity="info">No products returned from Zid yet.</Alert>
+                    </Box>
+                  ) : (
+                    <Box sx={{ overflowX: 'auto' }}>
+                      <Box component="table" sx={{ width: '100%', minWidth: 760, borderCollapse: 'collapse' }}>
+                        <Box component="thead" sx={{ bgcolor: '#f8fafc' }}>
+                          <Box component="tr">
+                            {['Product', 'SKU', 'Price', 'Stock', 'Delete'].map((heading) => (
+                              <Box component="th" key={heading} sx={{ p: 2, textAlign: 'left', fontSize: 13, color: '#475467' }}>
+                                {heading}
+                              </Box>
+                            ))}
+                          </Box>
+                        </Box>
+                        <Box component="tbody">
+                          {products.map((product, index) => {
+                            const productId = field(product, ['product_id', 'id'], '')
+                            return (
+                              <Box component="tr" key={productId || index} sx={{ borderTop: '1px solid #eef0f3' }}>
+                                <Box component="td" sx={{ p: 2 }}>
+                                  <Typography sx={{ fontWeight: 800, overflowWrap: 'anywhere' }}>
+                                    {field(product, ['product_name', 'name', 'title'])}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    ID: {productId || '-'}
+                                  </Typography>
+                                </Box>
+                                <Box component="td" sx={{ p: 2, overflowWrap: 'anywhere' }}>{field(product, ['sku'])}</Box>
+                                <Box component="td" sx={{ p: 2, fontWeight: 800 }}>{field(product, ['price'], 0)} SAR</Box>
+                                <Box component="td" sx={{ p: 2 }}>{stockLabel(product)}</Box>
+                                <Box component="td" sx={{ p: 2 }}>
+                                  <Button
+                                    variant="outlined"
+                                    color="error"
+                                    size="small"
+                                    onClick={() => deleteProduct(product)}
+                                    disabled={deletingProductId === productId}
+                                  >
+                                    {deletingProductId === productId ? 'Deleting...' : 'Delete'}
+                                  </Button>
+                                </Box>
+                              </Box>
+                            )
+                          })}
+                        </Box>
+                      </Box>
+                    </Box>
                   )}
                 </Paper>
               </Grid>
